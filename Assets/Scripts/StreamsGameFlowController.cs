@@ -1,12 +1,14 @@
 using System.Collections;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 /// <summary>
-/// 1라운드: 플레이어 팔이 카메라 → 카드 자동 뽑기 → 플레이어 배치까지 대기.
-/// 이어서 AI 판 세 곳을 순서대로 카메라로 보여 주며 추론 배치 → 다시 플레이어 팔.
-/// randomoutnum은 Awake에서 비활성화되며, 덱은 이 컴포넌트가 동일 규칙으로 관리합니다.
+/// 4분할 화면 모드 (낙관적 업데이트).
+/// 플레이어가 카드를 놓으면 즉시 다음 라운드로 진행.
+/// AI 3명은 각자 독립 큐에서 비동기로 계산·배치.
+/// 레이아웃: 플레이어 좌측 절반 / AI1·2·3 우측 1/3씩.
 /// </summary>
 [DefaultExecutionOrder(-1000)]
 public class StreamsGameFlowController : MonoBehaviour
@@ -18,26 +20,17 @@ public class StreamsGameFlowController : MonoBehaviour
     [Tooltip("AI 판 1·2·3 순서. 기본은 MCTS(useMcts); ONNX 쓰려면 해당 컴포넌트에서 useMcts 끄고 모델 할당.")]
     public StreamsAIController[] aiModels = new StreamsAIController[3];
 
-    [Header("카메라 뷰 (레거시: 자동 탑다운 사용 시 미사용)")]
-    public Transform playerCameraView;
-    public Transform[] aiCameraViews = new Transform[3];
+    [Header("4분할 카메라 (비워 두면 mainCamera 복제해 자동 생성)")]
+    [Tooltip("0=플레이어(좌측절반), 1=AI1(우상), 2=AI2(우중), 3=AI3(우하). 비워 두면 자동 생성.")]
+    public Camera[] boardCameras = new Camera[4];
 
     [Header("카메라 (GameBoard_0~3 기준)")]
-    [Tooltip("GameBoard 피벗 기준 로컬 위치. 사진2는 GameBoard_3와 동일 월드 좌표이므로 보통 (0,0,0). GameBoard 부모가 없을 때만 아래 탑다운 대체값을 씁니다.")]
     public Vector3 cameraLocalPosition = Vector3.zero;
-    [Tooltip("각 GameBoard 로컬 공간에서 카메라 오일러 각 (사진2: 90, 0, 0).")]
     public Vector3 cameraLocalEuler = new Vector3(90f, 0f, 0f);
 
     [Header("탑다운 카메라 (GameBoard 부모 없을 때만)")]
-    [Tooltip("보드에서 카메라까지 최소 거리(보드 평면에 수직). 바운드가 크면 자동으로 더 올라갑니다.")]
     public float topDownMinHeightAboveBoard = 38f;
-    [Tooltip("바운드 반경(가로·세로 중 큰 값)에 곱해 여유를 둡니다.")]
     public float topDownExtentScale = 1.15f;
-
-    [Header("타이밍")]
-    public float cameraMoveDuration = 0.65f;
-    public float delayAfterCameraArrive = 0.12f;
-    public float delayAfterAIPlacement = 0.4f;
 
     [Header("AI 입력(학습 파이프라인과 맞추기)")]
     [Tooltip("빈 칸: -1. 조커 카드의 정수 표현.")]
@@ -47,6 +40,23 @@ public class StreamsGameFlowController : MonoBehaviour
     public string endSceneName = "EndScene";
     public float endSceneDelay = 1.5f;
 
+    // 플레이어: 좌측 절반 / AI1~3: 우측 열을 1/3씩
+    static readonly Rect[] k_SplitRects = new Rect[]
+    {
+        new Rect(0f,   0.5f, 0.5f, 0.5f), // 0: 플레이어 (좌상)
+        new Rect(0.5f, 0.5f, 0.5f, 0.5f), // 1: AI1      (우상)
+        new Rect(0f,   0f,   0.5f, 0.5f), // 2: AI2      (좌하)
+        new Rect(0.5f, 0f,   0.5f, 0.5f), // 3: AI3      (우하)
+    };
+
+    struct AiJob
+    {
+        public string card;
+        public List<string> deckSnapshot;
+    }
+
+    Queue<AiJob>[] _aiQueues;
+    bool _gameEnded;
     bool _waitingForPlayer;
 
     void Awake()
@@ -64,29 +74,92 @@ public class StreamsGameFlowController : MonoBehaviour
         }
 
         if (aiBoards != null)
-        {
             foreach (var ai in aiBoards)
-            {
                 if (ai != null) ai.isPlayerControlledBoard = false;
-            }
+
+        _aiQueues = new Queue<AiJob>[3];
+        for (int i = 0; i < 3; i++)
+        {
+            _aiQueues[i] = new Queue<AiJob>();
+            StartCoroutine(AiWorker(i));
         }
 
-        if (mainCamera != null && playerBoard != null)
-            ApplyTopDownCamera(playerBoard);
-
+        SetupSplitScreenCameras();
         StartCoroutine(GameLoopRoutine());
     }
 
     void OnDestroy()
     {
+        _gameEnded = true;
         if (playerBoard != null)
             playerBoard.OnPlayerCardPlaced -= OnPlayerCardPlaced;
     }
 
-    void OnPlayerCardPlaced()
+    void OnPlayerCardPlaced() => _waitingForPlayer = false;
+
+    // ──────────────────────────────────────────────
+    // 카메라 4분할 설정
+    // ──────────────────────────────────────────────
+
+    void SetupSplitScreenCameras()
     {
-        _waitingForPlayer = false;
+        if (mainCamera == null) return;
+
+        if (boardCameras == null || boardCameras.Length != 4)
+            boardCameras = new Camera[4];
+
+        num_path[] allBoards = new num_path[4];
+        allBoards[0] = playerBoard;
+        for (int i = 0; i < 3; i++)
+            allBoards[i + 1] = (aiBoards != null && i < aiBoards.Length) ? aiBoards[i] : null;
+
+        for (int i = 0; i < 4; i++)
+        {
+            if (boardCameras[i] == null)
+            {
+                if (i == 0)
+                {
+                    boardCameras[0] = mainCamera;
+                }
+                else
+                {
+                    var go = new GameObject($"BoardCamera_{i}");
+                    var cam = go.AddComponent<Camera>();
+                    cam.clearFlags      = mainCamera.clearFlags;
+                    cam.backgroundColor = mainCamera.backgroundColor;
+                    cam.cullingMask     = mainCamera.cullingMask;
+                    cam.fieldOfView     = mainCamera.fieldOfView;
+                    cam.nearClipPlane   = mainCamera.nearClipPlane;
+                    cam.farClipPlane    = mainCamera.farClipPlane;
+                    cam.depth           = mainCamera.depth + i;
+                    boardCameras[i]     = cam;
+                }
+            }
+
+            boardCameras[i].rect = k_SplitRects[i];
+
+            if (allBoards[i] != null)
+                PositionCamera(boardCameras[i], allBoards[i]);
+        }
     }
+
+    void PositionCamera(Camera cam, num_path board)
+    {
+        StreamsBoardCameraPose.GetCameraPose(
+            board.transform,
+            board.slots,
+            cameraLocalPosition,
+            cameraLocalEuler,
+            topDownMinHeightAboveBoard,
+            topDownExtentScale,
+            out Vector3 pos,
+            out Quaternion rot);
+        cam.transform.SetPositionAndRotation(pos, rot);
+    }
+
+    // ──────────────────────────────────────────────
+    // 메인 게임 루프 (플레이어 전용, AI를 기다리지 않음)
+    // ──────────────────────────────────────────────
 
     IEnumerator GameLoopRoutine()
     {
@@ -105,8 +178,6 @@ public class StreamsGameFlowController : MonoBehaviour
                 break;
             }
 
-            yield return MoveCameraToBoard(playerBoard);
-
             int pick = Random.Range(0, deck.Count);
             string currentCard = deck[pick];
             deck.RemoveAt(pick);
@@ -116,26 +187,23 @@ public class StreamsGameFlowController : MonoBehaviour
             StreamsAgentLog.Line("H00", "StreamsGameFlow.GameLoopRoutine", "before playerBoard.ReceiveCard", $"{{\"currentCard\":\"{StreamsAgentLog.Esc(currentCard)}\"}}");
             // #endregion
             playerBoard.ReceiveCard(currentCard);
+
+            // 플레이어가 놓을 때까지만 대기
             while (_waitingForPlayer)
                 yield return null;
 
+            // AI 큐에 작업 추가 후 즉시 다음 라운드 진행 (낙관적 업데이트)
+            var deckSnapshot = new List<string>(deck);
             for (int a = 0; a < aiBoards.Length; a++)
             {
-                var ai = aiBoards[a];
-                if (ai == null) continue;
-
-                yield return MoveCameraToBoard(ai);
-
-                StreamsAIController model = (aiModels != null && a < aiModels.Length) ? aiModels[a] : null;
-                int slot = PickAiSlot(ai, currentCard, model, deck);
-                if (slot >= 0)
-                    ai.PlaceCardFromAI(slot, currentCard);
-
-                yield return new WaitForSeconds(delayAfterAIPlacement);
+                if (aiBoards[a] == null) continue;
+                _aiQueues[a].Enqueue(new AiJob { card = currentCard, deckSnapshot = deckSnapshot });
             }
         }
 
-        yield return MoveCameraToBoard(playerBoard);
+        // 게임 루프 종료 — AI 큐가 모두 비워질 때까지 대기 후 결과 저장
+        _gameEnded = true;
+        yield return WaitForAllAiQueues();
 
         StreamsGameResults.SaveFromBoards(playerBoard, aiBoards);
 
@@ -144,6 +212,100 @@ public class StreamsGameFlowController : MonoBehaviour
 
         if (!string.IsNullOrWhiteSpace(endSceneName))
             SceneManager.LoadScene(endSceneName);
+    }
+
+    IEnumerator WaitForAllAiQueues()
+    {
+        bool anyPending;
+        do
+        {
+            anyPending = false;
+            for (int a = 0; a < _aiQueues.Length; a++)
+                if (_aiQueues[a].Count > 0) { anyPending = true; break; }
+            if (anyPending) yield return null;
+        } while (anyPending);
+    }
+
+    // ──────────────────────────────────────────────
+    // AI 비동기 워커 (보드 1개에 1개 코루틴)
+    // ──────────────────────────────────────────────
+
+    IEnumerator AiWorker(int a)
+    {
+        while (true)
+        {
+            while (_aiQueues[a].Count == 0)
+            {
+                if (_gameEnded) yield break;
+                yield return null;
+            }
+
+            var job = _aiQueues[a].Dequeue();
+            var board = aiBoards[a];
+            var model = (aiModels != null && a < aiModels.Length) ? aiModels[a] : null;
+
+            // 현재 보드 상태 스냅샷 (메인 스레드에서)
+            int[] state = SnapshotBoardState(board);
+            int emptyCount = 0;
+            foreach (var v in state) if (v == -1) emptyCount++;
+            int futureTileCount = Mathf.Max(0, emptyCount - 1);
+
+            var remainingMcts = new List<int>(job.deckSnapshot.Count);
+            foreach (var s in job.deckSnapshot) remainingMcts.Add(CardStringToMctsInt(s));
+
+            int newTile = CardStringToModelInt(job.card);
+
+            // AI 계산을 백그라운드 스레드에서 실행 (메인 스레드 블로킹 방지)
+            int slot = -1;
+            if (model != null)
+            {
+                var capturedState  = state;
+                var capturedDeck   = remainingMcts;
+                int capturedTile   = newTile;
+                int capturedFuture = futureTileCount;
+                int capturedJoker  = jokerModelValue;
+
+                var task = Task.Run(() =>
+                    model.GetBestPosition(capturedState, capturedTile, capturedDeck, capturedFuture, capturedJoker));
+
+                while (!task.IsCompleted) yield return null;
+
+                if (task.IsFaulted)
+                {
+                    Debug.LogWarning($"AI[{a}] 계산 오류, 첫 번째 빈 칸으로 대체: {task.Exception?.GetBaseException().Message}");
+                    slot = -1;
+                }
+                else
+                {
+                    slot = task.Result;
+                }
+            }
+
+            // 메인 스레드에서 유효성 검증 후 배치
+            if (slot < 0 || slot >= board.slots.Count || board.slots[slot] == null || board.slots[slot].isFilled)
+                slot = FirstEmptySlotIndex(board);
+
+            if (slot >= 0)
+                board.PlaceCardFromAI(slot, job.card);
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    // 유틸리티
+    // ──────────────────────────────────────────────
+
+    int[] SnapshotBoardState(num_path board)
+    {
+        int n = Mathf.Min(20, board.slots.Count);
+        var state = new int[20];
+        for (int i = 0; i < 20; i++)
+        {
+            if (i >= n || board.slots[i] == null || !board.slots[i].isFilled)
+                state[i] = -1;
+            else
+                state[i] = CardStringToModelInt(board.slots[i].cardValue);
+        }
+        return state;
     }
 
     static List<string> BuildDeck()
@@ -157,47 +319,6 @@ public class StreamsGameFlowController : MonoBehaviour
         };
     }
 
-    int PickAiSlot(num_path board, string card, StreamsAIController aiController, List<string> remainingDeckStrings)
-    {
-        if (board == null || board.slots == null || board.slots.Count == 0) return -1;
-
-        int n = Mathf.Min(20, board.slots.Count);
-        var state = new int[20];
-        for (int i = 0; i < 20; i++)
-        {
-            if (i >= n || board.slots[i] == null || !board.slots[i].isFilled)
-                state[i] = -1;
-            else
-                state[i] = CardStringToModelInt(board.slots[i].cardValue);
-        }
-
-        int emptyCount = 0;
-        for (int i = 0; i < 20; i++)
-        {
-            if (state[i] == -1) emptyCount++;
-        }
-
-        int futureTileCount = Mathf.Max(0, emptyCount - 1);
-
-        var remainingMcts = new List<int>(remainingDeckStrings != null ? remainingDeckStrings.Count : 0);
-        if (remainingDeckStrings != null)
-        {
-            foreach (var s in remainingDeckStrings)
-                remainingMcts.Add(CardStringToMctsInt(s));
-        }
-
-        int newTile = CardStringToModelInt(card);
-        int best = aiController != null
-            ? aiController.GetBestPosition(state, newTile, remainingMcts, futureTileCount, jokerModelValue)
-            : -1;
-
-        if (best < 0 || best >= board.slots.Count || board.slots[best] == null || board.slots[best].isFilled)
-            best = FirstEmptySlotIndex(board);
-
-        return best;
-    }
-
-    /// <summary>MCTS·Python 규약: 조커 0 (모델 입력용 <see cref="jokerModelValue"/>와 별개).</summary>
     int CardStringToMctsInt(string s)
     {
         if (string.IsNullOrEmpty(s)) return -1;
@@ -210,10 +331,7 @@ public class StreamsGameFlowController : MonoBehaviour
     int FirstEmptySlotIndex(num_path board)
     {
         for (int i = 0; i < board.slots.Count; i++)
-        {
             if (board.slots[i] != null && !board.slots[i].isFilled) return i;
-        }
-
         return -1;
     }
 
@@ -224,53 +342,5 @@ public class StreamsGameFlowController : MonoBehaviour
         if (s == "J") return jokerModelValue;
         if (int.TryParse(s, out int v)) return v;
         return 0;
-    }
-
-    void ApplyTopDownCamera(num_path board)
-    {
-        StreamsBoardCameraPose.GetCameraPose(
-            board.transform,
-            board.slots,
-            cameraLocalPosition,
-            cameraLocalEuler,
-            topDownMinHeightAboveBoard,
-            topDownExtentScale,
-            out Vector3 pos,
-            out Quaternion rot);
-        mainCamera.transform.SetPositionAndRotation(pos, rot);
-    }
-
-    IEnumerator MoveCameraToBoard(num_path board)
-    {
-        if (mainCamera == null || board == null) yield break;
-
-        StreamsBoardCameraPose.GetCameraPose(
-            board.transform,
-            board.slots,
-            cameraLocalPosition,
-            cameraLocalEuler,
-            topDownMinHeightAboveBoard,
-            topDownExtentScale,
-            out Vector3 p1,
-            out Quaternion r1);
-
-        var cam = mainCamera.transform;
-        Vector3 p0 = cam.position;
-        Quaternion r0 = cam.rotation;
-        float dur = Mathf.Max(0.05f, cameraMoveDuration);
-        float elapsed = 0f;
-
-        while (elapsed < dur)
-        {
-            elapsed += Time.deltaTime;
-            float t = Mathf.Clamp01(elapsed / dur);
-            t = t * t * (3f - 2f * t);
-            cam.position = Vector3.Lerp(p0, p1, t);
-            cam.rotation = Quaternion.Slerp(r0, r1, t);
-            yield return null;
-        }
-
-        cam.SetPositionAndRotation(p1, r1);
-        yield return new WaitForSeconds(delayAfterCameraArrive);
     }
 }
