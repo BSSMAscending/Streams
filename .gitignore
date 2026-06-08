@@ -83,3 +83,7 @@ crashlytics-build.properties
 StreamsBuild/
 StreamsBuild.zip
 *.zip
+
+# .NET build output
+Tools/**/bin/
+Tools/**/obj/
