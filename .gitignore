@@ -83,6 +83,7 @@ crashlytics-build.properties
 .cursor/
 
 # Custom build output
+BuildStreams*/
 StreamsBuild/
 StreamsBuild.zip
 *.zip
