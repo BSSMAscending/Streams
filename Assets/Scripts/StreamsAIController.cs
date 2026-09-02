@@ -14,14 +14,26 @@ public enum StreamsAiMctsPerformance
     Strong
 }
 
+public readonly struct StreamsAiPositionDecision
+{
+    public readonly int BestPosition;
+    public readonly float[] SlotPercentages;
+
+    public StreamsAiPositionDecision(int bestPosition, float[] slotPercentages)
+    {
+        BestPosition = bestPosition;
+        SlotPercentages = slotPercentages ?? new float[20];
+    }
+}
+
 public class StreamsAIController : MonoBehaviour
 {
     [Header("모드")]
-    [Tooltip("켜면 Python streams_mcts.py와 동일한 롤아웃 MCTS 사용. ONNX는 끌 때만 로드.")]
+    [Tooltip("켜면 화면 점수 규칙과 동일한 롤아웃 MCTS 사용. ONNX는 끌 때만 로드.")]
     public bool useMcts = true;
 
     [Header("MCTS")]
-    [Tooltip("약함=1회, 보통=100회, 강함=10000회(mctsNSimOverride가 0일 때만 적용).")]
+    [Tooltip("약함=1회 학습, 보통=1000회 학습, 강함=1000000회 학습 (mctsNSimOverride가 0일 때만 적용).")]
     public StreamsAiMctsPerformance mctsPerformance = StreamsAiMctsPerformance.Normal;
 
     [Tooltip("0이면 위 성능 프리셋, 0보다 크면 매 턴 이 값으로 고정(프리셋 무시).")]
@@ -67,13 +79,29 @@ public class StreamsAIController : MonoBehaviour
     /// <param name="unityJokerValue"><see cref="StreamsGameFlowController.jokerModelValue"/></param>
     public int GetBestPosition(int[] board, int newTile, IList<int> remainingDeckMcts, int futureTileCount, int unityJokerValue)
     {
-        if (useMcts)
-            return GetBestPositionMcts(board, newTile, remainingDeckMcts, futureTileCount, unityJokerValue);
-
-        return GetBestPositionOnnx(board, newTile);
+        return GetPositionDecision(board, newTile, remainingDeckMcts, futureTileCount, unityJokerValue).BestPosition;
     }
 
-    int GetBestPositionMcts(int[] board, int newTile, IList<int> remainingDeckMcts, int futureTileCount, int unityJokerValue)
+    /// <summary>최적 칸과 빈 칸별 선택 비율(합 100%)을 반환합니다.</summary>
+    public StreamsAiPositionDecision GetPositionDecision(
+        int[] board,
+        int newTile,
+        IList<int> remainingDeckMcts,
+        int futureTileCount,
+        int unityJokerValue)
+    {
+        if (useMcts)
+            return GetPositionDecisionMcts(board, newTile, remainingDeckMcts, futureTileCount, unityJokerValue);
+
+        return GetPositionDecisionOnnx(board, newTile);
+    }
+
+    StreamsAiPositionDecision GetPositionDecisionMcts(
+        int[] board,
+        int newTile,
+        IList<int> remainingDeckMcts,
+        int futureTileCount,
+        int unityJokerValue)
     {
         CopyBoardToMcts(board, unityJokerValue);
         int tileM = ToMctsTile(newTile, unityJokerValue);
@@ -81,7 +109,11 @@ public class StreamsAIController : MonoBehaviour
         int? nsim = ResolveMctsNsim();
 
         var pool = remainingDeckMcts ?? System.Array.Empty<int>();
-        return StreamsMctsCore.MctsPosition(m_MctsBoardScratch, tileM, pool, futureTileCount, m_MctsRng, nsim);
+        var weights = new float[20];
+        int best = StreamsMctsCore.MctsPositionWithWeights(
+            m_MctsBoardScratch, tileM, pool, futureTileCount, m_MctsRng, nsim, weights);
+
+        return new StreamsAiPositionDecision(best, NormalizeWeightsToPercent(board, weights));
     }
 
     int? ResolveMctsNsim()
@@ -115,10 +147,10 @@ public class StreamsAIController : MonoBehaviour
         return v == unityJokerValue ? 0 : v;
     }
 
-    int GetBestPositionOnnx(int[] board, int newTile)
+    StreamsAiPositionDecision GetPositionDecisionOnnx(int[] board, int newTile)
     {
         if (m_Worker == null)
-            return -1;
+            return new StreamsAiPositionDecision(-1, new float[20]);
 
         var inputData = new float[21];
         for (int i = 0; i < 20; i++)
@@ -131,19 +163,64 @@ public class StreamsAIController : MonoBehaviour
         var outputTensor = m_Worker.PeekOutput() as Tensor<float>;
         float[] probabilities = outputTensor.DownloadToArray();
 
+        var weights = new float[20];
         float maxProb = float.NegativeInfinity;
         int bestPos = -1;
 
         for (int i = 0; i < 20; i++)
         {
-            if (board[i] == -1 && probabilities[i] > maxProb)
+            if (board[i] != -1)
+                continue;
+
+            weights[i] = probabilities[i];
+            if (probabilities[i] > maxProb)
             {
                 maxProb = probabilities[i];
                 bestPos = i;
             }
         }
 
-        return bestPos;
+        return new StreamsAiPositionDecision(bestPos, NormalizeWeightsToPercent(board, weights));
+    }
+
+    static float[] NormalizeWeightsToPercent(int[] board, float[] weights)
+    {
+        var percents = new float[20];
+        double sum = 0.0;
+        int emptyCount = 0;
+
+        for (int i = 0; i < 20; i++)
+        {
+            if (board[i] != -1)
+                continue;
+
+            emptyCount++;
+            if (weights[i] > 0f)
+                sum += weights[i];
+        }
+
+        if (emptyCount == 0)
+            return percents;
+
+        if (sum <= 0.0)
+        {
+            float each = 100f / emptyCount;
+            for (int i = 0; i < 20; i++)
+            {
+                if (board[i] == -1)
+                    percents[i] = each;
+            }
+
+            return percents;
+        }
+
+        for (int i = 0; i < 20; i++)
+        {
+            if (board[i] == -1)
+                percents[i] = (float)(weights[i] / sum * 100.0);
+        }
+
+        return percents;
     }
 
     void OnDestroy()

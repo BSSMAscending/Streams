@@ -2,64 +2,90 @@ using System;
 using System.Collections.Generic;
 
 /// <summary>
-/// Python streams_mcts.py와 동일한 롤아웃 MCTS·점수 규칙 (비내림 스트림, 조커 0).
-/// 화면 점수(<see cref="num_path"/>)와 다를 수 있음 — AI 목적함수는 본 클래스 기준.
+/// 롤아웃 MCTS. 보드: -1=빈칸, 0=조커, 1~30=카드.
+/// <see cref="CalcScore"/>는 화면 점수(<see cref="num_path"/>)와 동일한 규칙을 사용합니다.
 /// </summary>
 public static class StreamsMctsCore
 {
     static readonly int[] ScoreTable =
     {
-        0, 0, 1, 3, 5, 7, 9, 11, 15, 20, 25, 30, 35, 40, 50, 60, 70, 85, 100, 150, 300
+        0, 1, 3, 5, 7, 9, 11, 15, 20, 25,
+        30, 35, 40, 50, 60, 70, 85, 100, 150, 300
     };
 
     public static int CalcScore(int[] board)
     {
-        var b = new int[20];
-        Array.Copy(board, b, 20);
+        int jokerIdx = -1;
+        for (int i = 0; i < 20; i++)
+        {
+            if (board[i] == 0)
+            {
+                jokerIdx = i;
+                break;
+            }
+        }
+
+        if (jokerIdx == -1)
+            return CalcScoreNoJoker(board);
+
+        var front = new int[20];
+        var back = new int[20];
+        Array.Copy(board, front, 20);
+        Array.Copy(board, back, 20);
+        front[jokerIdx] = ResolveJokerReplacement(board, jokerIdx, attachToFront: true);
+        back[jokerIdx] = ResolveJokerReplacement(board, jokerIdx, attachToFront: false);
+
+        return Math.Max(CalcScoreNoJoker(front), CalcScoreNoJoker(back));
+    }
+
+    /// <summary>num_path 조커 규칙: 앞 구간=왼쪽 카드(없으면 0), 뒤 구간=오른쪽 카드(없으면 0).</summary>
+    static int ResolveJokerReplacement(int[] board, int jokerIdx, bool attachToFront)
+    {
+        if (attachToFront)
+            return jokerIdx > 0 ? board[jokerIdx - 1] : 0;
+
+        return jokerIdx < 19 ? board[jokerIdx + 1] : 0;
+    }
+
+    static int CalcScoreNoJoker(int[] board)
+    {
+        int totalScore = 0;
+        int currentRun = 0;
+        int prevValue = -1;
 
         for (int i = 0; i < 20; i++)
         {
-            if (b[i] != 0) continue;
-            int lv = 0;
-            for (int k = i - 1; k >= 0; k--)
+            int value = board[i];
+            if (value == -1)
             {
-                if (b[k] != -1 && b[k] != 0)
-                {
-                    lv = b[k];
-                    break;
-                }
+                if (currentRun > 0) totalScore += GetScore(currentRun);
+                currentRun = 0;
+                prevValue = -1;
+                continue;
             }
 
-            int rv = 30;
-            for (int k = i + 1; k < 20; k++)
+            if (currentRun > 0 && prevValue != -1 && value < prevValue)
             {
-                if (b[k] != -1 && b[k] != 0)
-                {
-                    rv = b[k];
-                    break;
-                }
+                totalScore += GetScore(currentRun);
+                currentRun = 1;
+            }
+            else
+            {
+                currentRun++;
             }
 
-            b[i] = lv <= rv ? (lv + rv) / 2 : lv;
+            prevValue = value;
         }
 
-        int t = 0;
-        int idx = 0;
-        while (idx < 20)
-        {
-            int r = 1;
-            int j = idx + 1;
-            while (j < 20 && b[j] >= b[j - 1])
-            {
-                r++;
-                j++;
-            }
+        if (currentRun > 0) totalScore += GetScore(currentRun);
+        return totalScore;
+    }
 
-            t += ScoreTable[r];
-            idx = j;
-        }
-
-        return t;
+    static int GetScore(int length)
+    {
+        if (length <= 0) return 0;
+        int idx = length < ScoreTable.Length ? length : ScoreTable.Length - 1;
+        return ScoreTable[idx];
     }
 
     public static int GreedyPos(int[] b, int tile)
@@ -144,12 +170,35 @@ public static class StreamsMctsCore
     /// </summary>
     public static int MctsPosition(int[] board, int tile, IList<int> remainingPool, int futureTileCount, Random rng, int? nSimOverride = null)
     {
+        var weights = new float[20];
+        return MctsPositionWithWeights(board, tile, remainingPool, futureTileCount, rng, nSimOverride, weights);
+    }
+
+    /// <summary>빈 칸마다 롤아웃 평균 점수를 outWeights에 채우고 최고 칸 인덱스를 반환합니다.</summary>
+    public static int MctsPositionWithWeights(
+        int[] board,
+        int tile,
+        IList<int> remainingPool,
+        int futureTileCount,
+        Random rng,
+        int? nSimOverride,
+        float[] outWeights)
+    {
+        for (int i = 0; i < 20; i++)
+            outWeights[i] = board[i] == -1 ? 0f : -1f;
+
         var empty = new List<int>(20);
         for (int i = 0; i < 20; i++)
             if (board[i] == -1) empty.Add(i);
 
-        if (empty.Count <= 1)
+        if (empty.Count == 0)
+            return -1;
+
+        if (empty.Count == 1)
+        {
+            outWeights[empty[0]] = 1f;
             return empty[0];
+        }
 
         int nEmpty = empty.Count;
         int nsim = nSimOverride ?? GetAdaptiveNsim(nEmpty);
@@ -187,6 +236,7 @@ public static class StreamsMctsCore
             }
 
             double avg = total / nsim;
+            outWeights[pos] = (float)avg;
             if (avg > bestSc)
             {
                 bestSc = avg;

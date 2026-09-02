@@ -1,5 +1,4 @@
 using UnityEngine;
-using UnityEngine.SceneManagement;
 
 /// <summary>
 /// UI Button OnClick 이벤트에 연결해서 씬 전환에 사용.
@@ -19,7 +18,7 @@ public class SceneButtonLoader : MonoBehaviour
             return;
         }
 
-        SceneManager.LoadScene(sceneName);
+        StreamsSceneTransition.Load(sceneName);
     }
 
     /// <summary>
@@ -33,6 +32,6 @@ public class SceneButtonLoader : MonoBehaviour
             return;
         }
 
-        SceneManager.LoadScene(targetSceneName);
+        StreamsSceneTransition.Load(targetSceneName);
     }
 }

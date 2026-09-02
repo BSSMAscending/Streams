@@ -12,16 +12,19 @@ public static class StreamsBoardCameraPose
     const string GameBoard1 = "GameBoard_1";
     const string GameBoard2 = "GameBoard_2";
     const string GameBoard3 = "GameBoard_3";
+    const string GameBoardPlayer = "GameBoard_Player";
+    const string GameBoardAi = "GameBoard_AI";
 
     /// <summary>
-    /// <paramref name="start"/>에서 부모를 따라 올라가며 GameBoard_0~3 중 하나를 찾습니다.
+    /// <paramref name="start"/>에서 부모를 따라 올라가며 GameBoard 앵커를 찾습니다.
     /// </summary>
     public static Transform TryFindGameBoardAnchor(Transform start)
     {
         for (Transform p = start; p != null; p = p.parent)
         {
             var n = p.name;
-            if (n == GameBoard0 || n == GameBoard1 || n == GameBoard2 || n == GameBoard3)
+            if (n == GameBoard0 || n == GameBoard1 || n == GameBoard2 || n == GameBoard3
+                || n == GameBoardPlayer || n == GameBoardAi)
                 return p;
         }
 

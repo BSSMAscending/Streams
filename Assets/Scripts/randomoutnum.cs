@@ -29,6 +29,8 @@ public class randomoutnum : MonoBehaviour
 
     void DrawCard()
     {
+        if (StreamsCardDrawCinematic.IsBlockingPlacement)
+            return;
         if (deck.Count == 0)
         {
             text.text = "";

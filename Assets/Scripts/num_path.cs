@@ -1,7 +1,6 @@
 using System;
 using System.Collections;
-using System.IO;
-using System.Text;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using System.Collections.Generic;
@@ -21,7 +20,11 @@ public class num_path : MonoBehaviour
     public Button drawButton;
     public Text scoreText;
     public Text scoreText2;
+    [Tooltip("비우면 PlayerScoreText / AIScoreText 이름으로 찾습니다.")]
+    public TextMeshProUGUI uiScoreLabel;
     public List<Slot3D> slots;
+    [Tooltip("비우면 PlayerBoard/AIBoard의 Slots 자식에서 자동으로 찾습니다.")]
+    public List<StreamsUiSlot> uiSlots;
 
     [Header("3D Models")]
     public List<NumberModelMapping> numberPrefabs;
@@ -49,6 +52,16 @@ public class num_path : MonoBehaviour
     [Tooltip("플레이어만 클릭 입력을 받습니다. AI 판은 끄세요.")]
     public bool isPlayerControlledBoard = true;
 
+    [Header("AI 확률 표시")]
+    [Tooltip("3D TextMesh 라벨 부모. Canvas 하위가 아닌 GameBoard 직속 Transform.")]
+    public Transform aiProbabilityRoot;
+
+    const string ProbabilityLabelRootName = "AiProbability";
+    const string PlayerScoreObjectName = "PlayerScoreText";
+    const string AiScoreObjectName = "AIScoreText";
+    const string BoardCanvasName = "BoardCanvas";
+    const string LegacyBoardsRootName = "GameBoards";
+
     /// <summary>플레이어가 이번에 뽑은 카드를 칸에 놓았을 때 한 번 호출됩니다.</summary>
     public event System.Action OnPlayerCardPlaced;
 
@@ -60,6 +73,15 @@ public class num_path : MonoBehaviour
     Camera _flowMainCamera;
     bool _previewAnimating;
     Coroutine _dealCoroutine;
+    Slot3D _aiLastBrightSlot;
+    bool _probabilityBindingsDone;
+    int _displayedUiScore;
+    bool _hasDisplayedUiScore;
+    Vector3 _uiScoreBaseScale = Vector3.one;
+    bool _uiScoreScaleCaptured;
+    Coroutine _scorePop;
+    bool _placementRestricted;
+    int _allowedPlacementSlot = -1;
 
     int[] scoreTable = new int[]
     {
@@ -69,36 +91,94 @@ public class num_path : MonoBehaviour
 
     void Awake()
     {
-        var flow = UnityEngine.Object.FindFirstObjectByType<StreamsGameFlowController>();
-        if (flow != null)
-            _flowMainCamera = flow.mainCamera;
+        ApplyBoardRoleFromAnchor();
+        ResolveFlowCamera();
     }
 
-    Camera GameplayCameraOrMain() => _flowMainCamera != null ? _flowMainCamera : Camera.main;
+    void ApplyBoardRoleFromAnchor()
+    {
+        Transform anchor = StreamsBoardCameraPose.TryFindGameBoardAnchor(transform);
+        if (anchor == null)
+            return;
+
+        if (anchor.name == "GameBoard_Player")
+            isPlayerControlledBoard = true;
+        else if (anchor.name == "GameBoard_AI")
+            isPlayerControlledBoard = false;
+    }
+
+    void ResolveFlowCamera()
+    {
+        var flow = UnityEngine.Object.FindFirstObjectByType<StreamsGameFlowController>();
+        if (flow != null)
+        {
+            _flowMainCamera = isPlayerControlledBoard ? flow.PlayerCamera : flow.AiCamera;
+            if (_flowMainCamera == null)
+                _flowMainCamera = flow.mainCamera;
+        }
+    }
+
+    Camera GameplayCameraOrMain()
+    {
+        if (_flowMainCamera == null)
+            ResolveFlowCamera();
+        return _flowMainCamera != null ? _flowMainCamera : Camera.main;
+    }
 
     void Start()
     {
-        if (drawButton == null || scoreText == null || scoreText2 == null)
-            Debug.LogError("UI 구성요소가 연결되지 않았습니다!");
+        BindUiScoreLabel();
+        if (isPlayerControlledBoard && uiScoreLabel == null && (scoreText == null || scoreText2 == null))
+            Debug.LogError($"{name}: 플레이어 보드의 점수 라벨이 연결되지 않았습니다.");
+
         if (holdingPoint == null && StreamsBoardCameraPose.TryFindGameBoardAnchor(transform) == null)
-            Debug.LogError("num_path: holdingPoint가 비어 있고 GameBoard_0~3 앵커도 없어 미리보기 위치를 찾을 수 없습니다.");
+            Debug.LogError("num_path: holdingPoint가 비어 있고 GameBoard 앵커도 없어 미리보기 위치를 찾을 수 없습니다.");
         else if (holdingPoint == null)
-            Debug.LogWarning("num_path: holdingPoint 미지정 — 런타임에 이 판의 GameBoard_x 하위에서 이름 'holdingPoint'를 찾습니다.");
+            Debug.LogWarning("num_path: holdingPoint 미지정 — 런타임에 이 판의 GameBoard 하위에서 이름 'holdingPoint'를 찾습니다.");
         if (numberPrefabs == null || numberPrefabs.Count == 0)
             Debug.LogError("num_path: numberPrefabs가 비어 있어 카드 모델을 생성할 수 없습니다.");
 
-        scoreText.text = "";
-        scoreText2.text = "현재 점수: 0";
-
-        for (int i = 0; i < slots.Count; i++)
+        if (scoreText != null)
+            scoreText.text = "";
+        if (scoreText2 != null)
         {
-            if (slots[i] != null)
+            scoreText2.text = isPlayerControlledBoard ? "현재 점수: 0" : "";
+            ApplyCurrentScoreLabelLayout(scoreText2);
+        }
+
+        SetUiScore(0);
+
+        if (slots != null)
+        {
+            for (int i = 0; i < slots.Count; i++)
             {
-                float slotScale = cardSlotExtraScale > 0.0001f ? cardSlotExtraScale : cardPreviewExtraScale;
-                slots[i].placedModelExtraScale = slotScale;
-                slots[i].SetEmpty();
+                if (slots[i] != null)
+                {
+                    float slotScale = SlotExtraScale;
+                    slots[i].placedModelExtraScale = slotScale;
+                    slots[i].SetSlotIndex(i);
+                    slots[i].SetDimmedPalette(!isPlayerControlledBoard);
+                    slots[i].SetEmpty();
+                }
             }
         }
+
+        BindUiSlots();
+
+        if (!isPlayerControlledBoard)
+            BindSlotProbabilityLabels();
+    }
+
+    /// <summary>
+    /// zip 피드백: 점수 글자를 기차 흰 선에서 피하고 키웁니다.
+    /// </summary>
+    static void ApplyCurrentScoreLabelLayout(Text label)
+    {
+        if (label == null)
+            return;
+
+        label.fontSize = 30;
+        label.rectTransform.anchoredPosition = new Vector2(0f, -300f);
     }
 
     /// <summary>
@@ -126,6 +206,165 @@ public class num_path : MonoBehaviour
         }
 
         return holdingPoint;
+    }
+
+    bool HasUiSlots => uiSlots != null && uiSlots.Count > 0;
+
+    public int SlotCount
+    {
+        get
+        {
+            if (HasUiSlots)
+                return uiSlots.Count;
+            return slots != null ? slots.Count : 0;
+        }
+    }
+
+    public bool IsSlotFilled(int index)
+    {
+        if (HasUiSlots)
+            return index < 0 || index >= uiSlots.Count || uiSlots[index] == null || uiSlots[index].isFilled;
+        if (slots == null || index < 0 || index >= slots.Count || slots[index] == null)
+            return true;
+        return slots[index].isFilled;
+    }
+
+    public string GetSlotCardValue(int index)
+    {
+        if (HasUiSlots)
+        {
+            if (index < 0 || index >= uiSlots.Count || uiSlots[index] == null || !uiSlots[index].isFilled)
+                return null;
+            return uiSlots[index].cardValue;
+        }
+
+        if (slots == null || index < 0 || index >= slots.Count || slots[index] == null || !slots[index].isFilled)
+            return null;
+        return slots[index].cardValue;
+    }
+
+    public int FirstEmptySlotIndex()
+    {
+        int n = SlotCount;
+        for (int i = 0; i < n; i++)
+        {
+            if (!IsSlotFilled(i))
+                return i;
+        }
+
+        return -1;
+    }
+
+    public void EnsureUiSlotsBound()
+    {
+        BindUiScoreLabel();
+        BindUiSlots();
+    }
+
+    /// <summary>튜토리얼: 이 칸만 배치를 받습니다. <paramref name="index"/>가 음수면 어떤 칸도 받지 않습니다.</summary>
+    public void SetAllowedPlacementSlot(int index)
+    {
+        _placementRestricted = true;
+        _allowedPlacementSlot = index;
+    }
+
+    public void ClearAllowedPlacementSlot()
+    {
+        _placementRestricted = false;
+        _allowedPlacementSlot = -1;
+    }
+
+    void BindUiSlots()
+    {
+        if (uiSlots != null && uiSlots.Count > 0)
+        {
+            WireUiSlotClicks();
+            RefreshUiRunOutlines();
+            return;
+        }
+
+        string boardName = isPlayerControlledBoard ? "PlayerBoard" : "AIBoard";
+        Transform board = FindUiBoardRoot(boardName);
+        if (board == null)
+            return;
+
+        Transform root = board.Find("Slots");
+        if (root == null)
+            root = FindNamedDeepChild(board, "Slots");
+        if (root == null)
+            return;
+
+        uiSlots = new List<StreamsUiSlot>();
+        for (int i = 0; i < root.childCount; i++)
+        {
+            var slot = root.GetChild(i).GetComponent<StreamsUiSlot>();
+            if (slot == null || slot.IsHoldingPreview)
+                continue;
+            uiSlots.Add(slot);
+        }
+
+        if (uiSlots.Count > 20)
+            uiSlots.RemoveRange(20, uiSlots.Count - 20);
+
+        WireUiSlotClicks();
+        if (!HasUiSlots)
+            Debug.LogWarning($"{name}: {boardName}/Slots에서 StreamsUiSlot을 찾지 못했습니다. 자식 순서와 컴포넌트를 확인하세요.");
+        RefreshUiRunOutlines();
+    }
+
+    static Transform FindUiBoardRoot(string boardName)
+    {
+        var named = GameObject.Find(boardName);
+        if (named != null)
+            return named.transform;
+
+        foreach (var canvas in FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (canvas == null)
+                continue;
+            Transform found = canvas.transform.Find(boardName);
+            if (found != null)
+                return found;
+            found = FindNamedDeepChild(canvas.transform, boardName);
+            if (found != null)
+                return found;
+        }
+
+        return null;
+    }
+
+    void WireUiSlotClicks()
+    {
+        if (!HasUiSlots)
+            return;
+
+        for (int i = 0; i < uiSlots.Count; i++)
+        {
+            if (uiSlots[i] == null)
+                continue;
+            uiSlots[i].BindPlacement(i, OnSlotClicked, isPlayerControlledBoard);
+        }
+    }
+
+    void ClearUiHints()
+    {
+        if (!HasUiSlots)
+            return;
+
+        foreach (var slot in uiSlots)
+        {
+            if (slot != null && !slot.isFilled)
+                slot.SetEmpty();
+        }
+    }
+
+    void ClearHoldingPreview()
+    {
+        foreach (var slot in FindObjectsByType<StreamsUiSlot>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (slot != null && slot.IsHoldingPreview)
+                slot.SetEmpty();
+        }
     }
 
     static Transform FindNamedDeepChild(Transform root, string targetName)
@@ -168,24 +407,13 @@ public class num_path : MonoBehaviour
         }
     }
 
-    static Vector3 CompensatedLocalScaleForParent(Vector3 prefabLocalScale, Vector3 parentLossy)
-    {
-        return new Vector3(
-            prefabLocalScale.x / Mathf.Max(Mathf.Abs(parentLossy.x), 1e-6f),
-            prefabLocalScale.y / Mathf.Max(Mathf.Abs(parentLossy.y), 1e-6f),
-            prefabLocalScale.z / Mathf.Max(Mathf.Abs(parentLossy.z), 1e-6f));
-    }
+    float PreviewExtraScale => cardPreviewExtraScale;
 
-    void ApplyPreviewExtraScaleMultiply(Transform card)
-    {
-        if (Mathf.Abs(cardPreviewExtraScale - 1f) > 1e-4f)
-            card.localScale *= cardPreviewExtraScale;
-    }
+    float SlotExtraScale => cardSlotExtraScale > 0.0001f ? cardSlotExtraScale : cardPreviewExtraScale;
 
-    void ApplyPreviewScaleAfterParent(Transform card, Transform spawnParent, Vector3 prefabLocalScale)
+    void ApplyPreviewModelScale(Transform card, Transform parent, Vector3 prefabLocalScale)
     {
-        card.localScale = CompensatedLocalScaleForParent(prefabLocalScale, spawnParent.lossyScale);
-        ApplyPreviewExtraScaleMultiply(card);
+        StreamsCardModelScale.Apply(card, parent, prefabLocalScale, PreviewExtraScale);
     }
 
     // #region agent log
@@ -223,7 +451,7 @@ public class num_path : MonoBehaviour
         var poseRef = new GameObject("PreviewPoseRef");
         poseRef.transform.SetPositionAndRotation(spawnParent.position, spawnParent.rotation);
         ApplyPreviewLocalPose(poseRef.transform, spawnParent);
-        ApplyPreviewScaleAfterParent(poseRef.transform, spawnParent, prefabLocalScale);
+        ApplyPreviewModelScale(poseRef.transform, spawnParent, prefabLocalScale);
         worldPos = poseRef.transform.position;
         worldRot = poseRef.transform.rotation;
         Destroy(poseRef);
@@ -234,13 +462,7 @@ public class num_path : MonoBehaviour
         Vector3 prefabLocalScale = prefab.transform.localScale;
         currentSpawnedModel = Instantiate(prefab, spawnParent.position, spawnParent.rotation);
         ApplyPreviewLocalPose(currentSpawnedModel.transform, spawnParent);
-        // #region agent log
-        LogPreviewScale("H-A", "num_path.SpawnPreviewInstant", "afterParent_beforeScale", currentSpawnedModel.transform, spawnParent, prefabLocalScale, false);
-        // #endregion
-        ApplyPreviewExtraScaleMultiply(currentSpawnedModel.transform);
-        // #region agent log
-        LogPreviewScale("H-A", "num_path.SpawnPreviewInstant", "afterMultiplyScale", currentSpawnedModel.transform, spawnParent, prefabLocalScale, false);
-        // #endregion
+        ApplyPreviewModelScale(currentSpawnedModel.transform, spawnParent, prefabLocalScale);
     }
 
     IEnumerator AnimateCardPreviewDeal(Transform spawnParent, Vector3 endWorldPos, Quaternion endWorldRot, Vector3 prefabLocalScale)
@@ -262,13 +484,6 @@ public class num_path : MonoBehaviour
         }
 
         ApplyPreviewLocalPose(tr, spawnParent);
-        // #region agent log
-        LogPreviewScale("H-C", "num_path.AnimateCardPreviewDeal", "beforeFinalScaleApply", tr, spawnParent, prefabLocalScale, true);
-        // #endregion
-        ApplyPreviewScaleAfterParent(tr, spawnParent, prefabLocalScale);
-        // #region agent log
-        LogPreviewScale("H-C", "num_path.AnimateCardPreviewDeal", "afterMultiplyScale", tr, spawnParent, prefabLocalScale, true);
-        // #endregion
         _previewAnimating = false;
         _dealCoroutine = null;
     }
@@ -290,7 +505,12 @@ public class num_path : MonoBehaviour
         pendingCard = drawn;
         drawnCount++;
 
-        drawButton.interactable = false;
+        if (drawButton != null)
+            drawButton.interactable = false;
+
+        EnsureUiSlotsBound();
+        if (HasUiSlots)
+            return;
 
         GameObject prefab = GetModelPrefab(drawn, false);
         if (prefab == null)
@@ -323,13 +543,7 @@ public class num_path : MonoBehaviour
             Quaternion startRot = dealPocket.rotation * Quaternion.Euler(0f, cardDealStartYawDegrees, 0f);
             currentSpawnedModel = Instantiate(prefab, dealPocket.position, startRot);
             currentSpawnedModel.transform.SetParent(spawnParent, true);
-            // #region agent log
-            LogPreviewScale("H-D", "num_path.ReceiveCard", "deal_afterParent_beforeScale", currentSpawnedModel.transform, spawnParent, prefabLocalScale, true);
-            // #endregion
-            ApplyPreviewExtraScaleMultiply(currentSpawnedModel.transform);
-            // #region agent log
-            LogPreviewScale("H-D", "num_path.ReceiveCard", "deal_afterMultiplyScale", currentSpawnedModel.transform, spawnParent, prefabLocalScale, true);
-            // #endregion
+            ApplyPreviewModelScale(currentSpawnedModel.transform, spawnParent, prefabLocalScale);
 
             ComputePreviewFinalWorldPose(spawnParent, prefabLocalScale, out Vector3 endWorldPos, out Quaternion endWorldRot);
             _dealCoroutine = StartCoroutine(AnimateCardPreviewDeal(spawnParent, endWorldPos, endWorldRot, prefabLocalScale));
@@ -363,7 +577,7 @@ public class num_path : MonoBehaviour
 
     void Update()
     {
-        if (!isPlayerControlledBoard) return;
+        if (!isPlayerControlledBoard || HasUiSlots) return;
         if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
         {
             HandleInteraction();
@@ -390,124 +604,452 @@ public class num_path : MonoBehaviour
         }
     }
 
+    static bool IsVerticalSlot(int idx) => (idx >= 0 && idx <= 4) || (idx >= 12 && idx <= 16);
+
+    static Quaternion RotationForSlot(int idx) => Quaternion.identity;
+
+    bool TryCreateCardModelForSlot(int idx, string cardToPlace, out GameObject model, out Quaternion rotation)
+    {
+        model = null;
+        rotation = RotationForSlot(idx);
+
+        if (IsVerticalSlot(idx))
+        {
+            GameObject prefabV = GetModelPrefab(cardToPlace, false);
+            if (prefabV != null)
+                model = Instantiate(prefabV);
+        }
+        else
+        {
+            GameObject prefabH = GetModelPrefab(cardToPlace, true);
+            if (prefabH != null)
+                model = Instantiate(prefabH);
+        }
+
+        return model != null;
+    }
+
     void OnSlotClicked(int idx)
-{
-    if (_previewAnimating) return;
-    if (pendingCard == null || currentSpawnedModel == null) return;
-    if (idx < 0 || idx >= slots.Count || slots[idx] == null) return;
-    if (slots[idx].isFilled) return;
-
-    string cardToPlace = pendingCard;
-    pendingCard = null;
-
-    bool isHorizontal = (idx >= 3 && idx <= 9) || (idx >= 14 && idx <= 19);
-    bool isVertical = (idx >= 10 && idx <= 13);
-
-    Quaternion rotation = Quaternion.identity;
-
-    if (isHorizontal)
     {
-        GameObject prefabH = GetModelPrefab(cardToPlace, true);
-        if (prefabH != null)
+        if (StreamsCardDrawCinematic.IsBlockingPlacement)
+            return;
+        if (!HasUiSlots && _previewAnimating)
+            return;
+        if (pendingCard == null)
+            return;
+        if (!HasUiSlots && currentSpawnedModel == null)
+            return;
+        if (idx < 0 || idx >= SlotCount)
+            return;
+        if (IsSlotFilled(idx))
+            return;
+        if (_placementRestricted && idx != _allowedPlacementSlot)
+            return;
+
+        string cardToPlace = pendingCard;
+        pendingCard = null;
+
+        if (HasUiSlots && idx < uiSlots.Count && uiSlots[idx] != null)
+            uiSlots[idx].SetFilled(cardToPlace);
+
+        ClearUiHints();
+        ClearHoldingPreview();
+
+        if (!HasUiSlots && slots != null && idx < slots.Count && slots[idx] != null && !slots[idx].isFilled)
+        {
+            if (TryCreateCardModelForSlot(idx, cardToPlace, out GameObject placedModel, out Quaternion rotation))
+            {
+                if (currentSpawnedModel != null)
+                    Destroy(currentSpawnedModel);
+                currentSpawnedModel = placedModel;
+                slots[idx].PlaceExistingObject(currentSpawnedModel, cardToPlace, rotation);
+            }
+            else if (currentSpawnedModel != null)
+            {
+                slots[idx].PlaceExistingObject(currentSpawnedModel, cardToPlace, RotationForSlot(idx));
+            }
+        }
+        else if (currentSpawnedModel != null)
         {
             Destroy(currentSpawnedModel);
-            currentSpawnedModel = Instantiate(prefabH);
         }
+
+        currentSpawnedModel = null;
+
+        if (drawButton != null)
+            drawButton.interactable = true;
+
+        UpdateCurrentScore();
+        CheckAllFilled();
+
+        if (isPlayerControlledBoard)
+            OnPlayerCardPlaced?.Invoke();
     }
-    else if (isVertical)
-    {
-        GameObject prefabV = GetModelPrefab(cardToPlace, false);
-        if (prefabV != null)
-        {
-            Destroy(currentSpawnedModel);
-            currentSpawnedModel = Instantiate(prefabV);
-            rotation = Quaternion.Euler(0, 0, 180);
-        }
-    }
-    else
-    {
-        GameObject prefabDefault = GetModelPrefab(cardToPlace, false);
-        if (prefabDefault != null)
-        {
-            Destroy(currentSpawnedModel);
-            currentSpawnedModel = Instantiate(prefabDefault);
-        }
-    }
-
-    slots[idx].PlaceExistingObject(currentSpawnedModel, cardToPlace, rotation); // 한번만 호출
-
-    currentSpawnedModel = null;
-
-    drawButton.interactable = true;
-
-    UpdateCurrentScore();
-    CheckAllFilled();
-
-    if (isPlayerControlledBoard)
-        OnPlayerCardPlaced?.Invoke();
-}
 
     /// <summary>AI·스크립트용: 이미 확정된 칸에 카드 모델을 올립니다. (ReceiveCard 없이 drawnCount만 증가)</summary>
     public void PlaceCardFromAI(int idx, string cardToPlace)
     {
-        if (idx < 0 || idx >= slots.Count || slots[idx] == null || slots[idx].isFilled) return;
+        if (idx < 0 || idx >= SlotCount || IsSlotFilled(idx)) return;
 
-        bool isHorizontal = (idx >= 3 && idx <= 9) || (idx >= 14 && idx <= 19);
-        bool isVertical = (idx >= 10 && idx <= 13);
-        Quaternion rotation = Quaternion.identity;
-        GameObject model = null;
+        if (HasUiSlots && idx < uiSlots.Count && uiSlots[idx] != null)
+            uiSlots[idx].SetFilled(cardToPlace);
 
-        if (isHorizontal)
+        if (slots != null && idx < slots.Count && slots[idx] != null && !slots[idx].isFilled)
         {
-            GameObject prefabH = GetModelPrefab(cardToPlace, true);
-            if (prefabH != null)
+            if (!TryCreateCardModelForSlot(idx, cardToPlace, out GameObject model, out Quaternion rotation))
             {
-                model = Instantiate(prefabH);
+                drawnCount++;
+                UpdateCurrentScore();
+                CheckAllFilled();
+                return;
             }
-        }
-        else if (isVertical)
-        {
-            GameObject prefabV = GetModelPrefab(cardToPlace, false);
-            if (prefabV != null)
+
+            if (!isPlayerControlledBoard && _aiLastBrightSlot != null)
+                _aiLastBrightSlot.SetCardModelBright(false);
+
+            slots[idx].PlaceExistingObject(model, cardToPlace, rotation);
+
+            if (!isPlayerControlledBoard)
             {
-                model = Instantiate(prefabV);
-                rotation = Quaternion.Euler(0, 0, 180);
-            }
-        }
-        else
-        {
-            GameObject prefab = GetModelPrefab(cardToPlace, false);
-            if (prefab != null)
-            {
-                model = Instantiate(prefab);
+                _aiLastBrightSlot = slots[idx];
+                _aiLastBrightSlot.SetCardModelBright(true);
             }
         }
 
-        if (model == null) return;
-
-        slots[idx].PlaceExistingObject(model, cardToPlace, rotation);
         drawnCount++;
 
         UpdateCurrentScore();
         CheckAllFilled();
     }
+
+    /// <summary>AI가 고른 각 칸의 선택 비율(%)을 빈 슬롯 위에 표시합니다. 이전 턴에 설치된 칸은 숨깁니다.</summary>
+    public void ShowSlotProbabilities(float[] slotPercentages)
+    {
+        if (slots == null || slotPercentages == null)
+            return;
+
+        BindSlotProbabilityLabels();
+
+        int count = Mathf.Min(slots.Count, slotPercentages.Length);
+        var emptySlots = new List<(int index, float percent)>();
+        for (int i = 0; i < count; i++)
+        {
+            if (slots[i] == null || slots[i].isFilled)
+                continue;
+
+            emptySlots.Add((i, slotPercentages[i]));
+        }
+
+        emptySlots.Sort((a, b) => a.percent.CompareTo(b.percent));
+
+        var opacityRelativeByIndex = new Dictionary<int, float>();
+        var colorRelativeByIndex = new Dictionary<int, float>();
+        var isHighestRankByIndex = new Dictionary<int, bool>();
+        int emptyCount = emptySlots.Count;
+        int rank = 0;
+        while (rank < emptyCount)
+        {
+            int tieEnd = rank;
+            float tiedPercent = emptySlots[tieEnd].percent;
+            while (tieEnd < emptyCount && Mathf.Approximately(emptySlots[tieEnd].percent, tiedPercent))
+                tieEnd++;
+
+            float avgRank = (rank + tieEnd - 1) * 0.5f;
+            bool isHighestRank = tieEnd == emptyCount;
+
+            float opacityRelative = emptyCount <= 1
+                ? 1f
+                : avgRank / (emptyCount - 1);
+
+            float colorRelative = 1f;
+            if (!isHighestRank)
+            {
+                colorRelative = emptyCount <= 2
+                    ? 1f
+                    : avgRank / (emptyCount - 2);
+            }
+
+            for (int j = rank; j < tieEnd; j++)
+            {
+                int slotIndex = emptySlots[j].index;
+                opacityRelativeByIndex[slotIndex] = opacityRelative;
+                colorRelativeByIndex[slotIndex] = colorRelative;
+                isHighestRankByIndex[slotIndex] = isHighestRank;
+            }
+
+            rank = tieEnd;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            if (slots[i] == null)
+                continue;
+
+            if (slots[i].isFilled)
+                slots[i].ClearProbabilityLabel();
+            else
+                slots[i].SetProbabilityPercent(
+                    slotPercentages[i],
+                    opacityRelativeByIndex[i],
+                    colorRelativeByIndex[i],
+                    isHighestRankByIndex[i]);
+        }
+    }
+
+    public void ClearSlotProbabilities()
+    {
+        if (slots == null)
+            return;
+
+        foreach (var slot in slots)
+            slot?.ClearProbabilityLabel();
+    }
+
+    public Transform GetProbabilityLabelRoot()
+    {
+        if (IsValidProbabilityLabelRoot(aiProbabilityRoot))
+            return aiProbabilityRoot;
+
+        Transform boardAnchor = StreamsBoardCameraPose.TryFindGameBoardAnchor(transform);
+        if (boardAnchor != null)
+        {
+            foreach (Transform child in boardAnchor)
+            {
+                if (child.name == ProbabilityLabelRootName && IsValidProbabilityLabelRoot(child))
+                {
+                    aiProbabilityRoot = child;
+                    return child;
+                }
+            }
+        }
+
+        Transform parent = boardAnchor != null ? boardAnchor : transform;
+        var go = new GameObject(ProbabilityLabelRootName);
+        go.transform.SetParent(parent, false);
+        aiProbabilityRoot = go.transform;
+        return aiProbabilityRoot;
+    }
+
+    /// <summary>Canvas 하위가 아닌 3D 라벨 루트.</summary>
+    public static bool IsValidProbabilityLabelRoot(Transform root)
+    {
+        if (root == null)
+            return false;
+
+        return root.GetComponentInParent<Canvas>() == null;
+    }
+
+    void BindSlotProbabilityLabels()
+    {
+        if (isPlayerControlledBoard || _probabilityBindingsDone || slots == null)
+            return;
+
+        Transform labelRoot = GetProbabilityLabelRoot();
+        DestroyMisplacedProbabilityLabels(labelRoot);
+
+        foreach (var slot in slots)
+            slot?.BindProbabilityLabelRoot(labelRoot, this);
+
+        _probabilityBindingsDone = true;
+    }
+
+    static void DestroyMisplacedProbabilityLabels(Transform labelRoot)
+    {
+        var stale = new List<GameObject>();
+
+        foreach (var root in UnityEngine.Object.FindObjectsByType<num_path>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (root.isPlayerControlledBoard)
+                continue;
+
+            Transform boardAnchor = StreamsBoardCameraPose.TryFindGameBoardAnchor(root.transform);
+            if (boardAnchor == null)
+                continue;
+
+            foreach (Transform t in boardAnchor.GetComponentsInChildren<Transform>(true))
+            {
+                if (!t.name.StartsWith("AiProbabilityLabel_", StringComparison.Ordinal))
+                    continue;
+
+                if (labelRoot != null && t.IsChildOf(labelRoot))
+                    continue;
+
+                stale.Add(t.gameObject);
+            }
+        }
+
+        foreach (var go in stale)
+        {
+            if (go != null)
+                Destroy(go);
+        }
+    }
+
+    public Vector3 GetBoardCenterWorld()
+    {
+        if (slots == null || slots.Count == 0)
+            return transform.position;
+
+        Vector3 sum = Vector3.zero;
+        int count = 0;
+        foreach (var slot in slots)
+        {
+            if (slot == null)
+                continue;
+
+            sum += slot.transform.position;
+            count++;
+        }
+
+        return count > 0 ? sum / count : transform.position;
+    }
+
     void UpdateCurrentScore()
     {
         int currentScore = GetBoardScore();
-        scoreText2.text = $"현재 점수: {currentScore}";
+        if (scoreText2 != null)
+            scoreText2.text = $"현재 점수: {currentScore}";
+        SetUiScore(currentScore, popIfGained: true);
+        RefreshUiRunOutlines();
+    }
+
+    void BindUiScoreLabel()
+    {
+        if (uiScoreLabel != null)
+            return;
+
+        string objectName = isPlayerControlledBoard ? PlayerScoreObjectName : AiScoreObjectName;
+        uiScoreLabel = FindNamedTmp(objectName);
+        if (uiScoreLabel != null)
+            SetUiScore(GetBoardScore());
+    }
+
+    void SetUiScore(int score, bool popIfGained = false)
+    {
+        if (uiScoreLabel == null)
+            BindUiScoreLabel();
+        if (uiScoreLabel == null)
+            return;
+
+        CaptureUiScoreScaleIfNeeded();
+        uiScoreLabel.text = score.ToString() + "점";
+
+        bool gained = _hasDisplayedUiScore && score > _displayedUiScore;
+        _displayedUiScore = score;
+        _hasDisplayedUiScore = true;
+
+        if (popIfGained && gained)
+            PlayScorePop();
+    }
+
+    void CaptureUiScoreScaleIfNeeded()
+    {
+        if (_uiScoreScaleCaptured || uiScoreLabel == null)
+            return;
+
+        _uiScoreBaseScale = uiScoreLabel.transform.localScale;
+        _uiScoreScaleCaptured = true;
+    }
+
+    void PlayScorePop()
+    {
+        if (uiScoreLabel == null)
+            return;
+
+        MonoBehaviour host = uiScoreLabel;
+        if (!host.isActiveAndEnabled)
+            return;
+
+        if (_scorePop != null)
+            host.StopCoroutine(_scorePop);
+
+        uiScoreLabel.transform.localScale = _uiScoreBaseScale;
+        _scorePop = host.StartCoroutine(ScorePopRoutine(uiScoreLabel.transform));
+    }
+
+    IEnumerator ScorePopRoutine(Transform target)
+    {
+        Vector3 from = _uiScoreBaseScale;
+        Vector3 peak = from * 1.35f;
+        const float upDuration = 0.08f;
+        const float downDuration = 0.16f;
+
+        float t = 0f;
+        while (t < upDuration)
+        {
+            t += Time.deltaTime;
+            float u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(t / upDuration));
+            target.localScale = Vector3.LerpUnclamped(from, peak, u);
+            yield return null;
+        }
+
+        t = 0f;
+        while (t < downDuration)
+        {
+            t += Time.deltaTime;
+            float u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(t / downDuration));
+            target.localScale = Vector3.LerpUnclamped(peak, from, u);
+            yield return null;
+        }
+
+        target.localScale = from;
+        _scorePop = null;
+    }
+
+    static TextMeshProUGUI FindNamedTmp(string objectName)
+    {
+        TextMeshProUGUI fallback = null;
+        foreach (var tmp in FindObjectsByType<TextMeshProUGUI>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (tmp == null || tmp.name != objectName)
+                continue;
+
+            if (IsUnderNamedParent(tmp.transform, LegacyBoardsRootName))
+                continue;
+
+            if (IsUnderNamedParent(tmp.transform, BoardCanvasName))
+                return tmp;
+
+            fallback = tmp;
+        }
+
+        return fallback;
+    }
+
+    static bool IsUnderNamedParent(Transform start, string parentName)
+    {
+        for (Transform t = start; t != null; t = t.parent)
+        {
+            if (t.name == parentName)
+                return true;
+        }
+
+        return false;
+    }
+
+    void RefreshUiRunOutlines()
+    {
+        if (!HasUiSlots)
+            return;
+
+        var cards = new List<string>();
+        int n = SlotCount;
+        for (int i = 0; i < n; i++)
+            cards.Add(GetSlotCardValue(i) ?? "");
+
+        StreamsRunOutlineOverlay.Refresh(uiSlots, StreamsAscendingRuns.FromCards(cards));
     }
 
     /// <summary>슬롯 상태 기준 최종 Streams 점수(조커 규칙 포함).</summary>
     public int GetBoardScore()
     {
-        if (slots == null) return 0;
-
         var currentCards = new List<string>();
-        foreach (var slot in slots)
-        {
-            if (slot != null) currentCards.Add(slot.isFilled ? slot.cardValue : "");
-            else currentCards.Add("");
-        }
+        int n = SlotCount;
+        if (n <= 0)
+            return 0;
+
+        for (int i = 0; i < n; i++)
+            currentCards.Add(GetSlotCardValue(i) ?? "");
 
         return CalculateScore(currentCards);
     }
@@ -531,12 +1073,12 @@ public class num_path : MonoBehaviour
 
     // J를 앞 run에 붙였을 때 점수
     List<string> frontList = new List<string>(cards);
-    frontList[jokerIdx] = (jokerIdx > 0) ? cards[jokerIdx - 1] : "0";
+    frontList[jokerIdx] = StreamsAscendingRuns.CopyNeighborValue(cards, jokerIdx - 1);
     int frontScore = CalculateScoreNoJoker(frontList);
 
     // J를 뒤 run에 붙였을 때 점수
     List<string> backList = new List<string>(cards);
-    backList[jokerIdx] = (jokerIdx < cards.Count - 1) ? cards[jokerIdx + 1] : "0";
+    backList[jokerIdx] = StreamsAscendingRuns.CopyNeighborValue(cards, jokerIdx + 1);
     int backScore = CalculateScoreNoJoker(backList);
 
     return Mathf.Max(frontScore, backScore);
@@ -600,20 +1142,15 @@ int CalculateScoreNoJoker(List<string> cards)
     if (jokerIdx != -1)
     {
         List<string> frontList = new List<string>(cards);
-        frontList[jokerIdx] = (jokerIdx > 0) ? cards[jokerIdx - 1] : "0";
+        frontList[jokerIdx] = StreamsAscendingRuns.CopyNeighborValue(cards, jokerIdx - 1);
         int frontScore = CalculateScoreNoJoker(frontList);
 
         List<string> backList = new List<string>(cards);
-        backList[jokerIdx] = (jokerIdx < cards.Count - 1) ? cards[jokerIdx + 1] : "0";
+        backList[jokerIdx] = StreamsAscendingRuns.CopyNeighborValue(cards, jokerIdx + 1);
         int backScore = CalculateScoreNoJoker(backList);
 
         processedCards = (frontScore >= backScore) ? frontList : backList;
     }
-
-    Color[] runColors = new Color[] {
-        new Color32(222, 218, 0, 255), new Color32(55, 115, 222, 255),
-        new Color32(231, 7, 44, 255), new Color32(28, 231, 20, 255), new Color32(134, 17, 231, 255)
-    };
 
     int runStart = 0;
     int runIndex = 0;
@@ -624,7 +1161,7 @@ int CalculateScoreNoJoker(List<string> cards)
         string clean = processedCards[i].Trim().ToUpper();
         if (string.IsNullOrEmpty(clean))
         {
-            ApplyRunColor(runStart, i - 1, runColors[runIndex++ % runColors.Length]);
+            ApplyRunColor(runStart, i - 1, StreamsAscendingRuns.RunColor(runIndex++));
             runStart = i + 1;
             prevValue = -1;
             continue;
@@ -634,13 +1171,13 @@ int CalculateScoreNoJoker(List<string> cards)
         {
             if (prevValue != -1 && value < prevValue)
             {
-                ApplyRunColor(runStart, i - 1, runColors[runIndex++ % runColors.Length]);
+                ApplyRunColor(runStart, i - 1, StreamsAscendingRuns.RunColor(runIndex++));
                 runStart = i;
             }
             prevValue = value;
         }
     }
-    ApplyRunColor(runStart, processedCards.Count - 1, runColors[runIndex % runColors.Length]);
+    ApplyRunColor(runStart, processedCards.Count - 1, StreamsAscendingRuns.RunColor(runIndex));
 }
 
     void ApplyRunColor(int start, int end, Color color)
@@ -657,18 +1194,45 @@ int CalculateScoreNoJoker(List<string> cards)
 
     void CheckAllFilled()
     {
-        foreach (var slot in slots) if (!slot.isFilled) return;
+        int n = SlotCount;
+        if (n <= 0)
+            return;
+
+        for (int i = 0; i < n; i++)
+        {
+            if (!IsSlotFilled(i))
+                return;
+        }
+
+        if (!isPlayerControlledBoard)
+        {
+            if (_aiLastBrightSlot != null)
+            {
+                _aiLastBrightSlot.SetCardModelBright(false);
+                _aiLastBrightSlot = null;
+            }
+        }
 
         List<string> currentCards = new List<string>();
-        foreach (var slot in slots)
+        for (int i = 0; i < n; i++)
+            currentCards.Add(GetSlotCardValue(i) ?? "");
+
+        if (!isPlayerControlledBoard)
         {
-            if (slot != null) currentCards.Add(slot.isFilled ? slot.cardValue : "");
-            else currentCards.Add("");
+            Transform boardAnchor = StreamsBoardCameraPose.TryFindGameBoardAnchor(transform);
+            StreamsBoardBackgroundDimmer.Instance?.RestoreTilesForBoard(boardAnchor);
         }
+
         HighlightAscendingRuns(currentCards);
 
-        scoreText.text = "최종 " + scoreText2.text;
-        drawButton.interactable = false;
+        int finalScore = GetBoardScore();
+        if (isPlayerControlledBoard)
+            StreamsGameResults.SetPlayerFinalScore(finalScore);
+
+        if (scoreText != null && scoreText2 != null)
+            scoreText.text = "최종 " + scoreText2.text;
+        if (drawButton != null)
+            drawButton.interactable = false;
     }
 
     GameObject GetModelPrefab(string val, bool horizontal)
@@ -690,15 +1254,6 @@ static class StreamsDebug9b
 {
     public static void Line(string hypothesisId, string location, string message, string dataJson)
     {
-        long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
-        var sb = new StringBuilder(384);
-        sb.Append("{\"sessionId\":\"9b10aa\",\"hypothesisId\":\"").Append(StreamsAgentLog.Esc(hypothesisId));
-        sb.Append("\",\"location\":\"").Append(StreamsAgentLog.Esc(location));
-        sb.Append("\",\"message\":\"").Append(StreamsAgentLog.Esc(message));
-        sb.Append("\",\"data\":").Append(string.IsNullOrEmpty(dataJson) ? "{}" : dataJson);
-        sb.Append(",\"timestamp\":").Append(ts).Append("}\n");
-        try { File.AppendAllText(Path.Combine(Application.dataPath, "..", "debug-9b10aa.log"), sb.ToString()); }
-        catch { }
     }
 }
 
@@ -712,18 +1267,6 @@ static class StreamsAgentLog
 
     public static void Line(string hypothesisId, string location, string message, string dataJson)
     {
-        long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
-        var sb = new StringBuilder(320);
-        sb.Append("{\"sessionId\":\"a65c5d\",\"hypothesisId\":\"").Append(Esc(hypothesisId));
-        sb.Append("\",\"location\":\"").Append(Esc(location));
-        sb.Append("\",\"message\":\"").Append(Esc(message));
-        sb.Append("\",\"data\":").Append(string.IsNullOrEmpty(dataJson) ? "{}" : dataJson);
-        sb.Append(",\"timestamp\":").Append(ts).Append("}\n");
-        string line = sb.ToString();
-        try { File.AppendAllText(Path.Combine(Application.dataPath, "..", "debug-a65c5d.log"), line); }
-        catch { }
-        try { File.AppendAllText(Path.Combine(Application.persistentDataPath, "debug-a65c5d.log"), line); }
-        catch { }
     }
 }
 // #endregion

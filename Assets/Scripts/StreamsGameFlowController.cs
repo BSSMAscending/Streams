@@ -1,14 +1,12 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using TMPro;
 using UnityEngine;
-using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 /// <summary>
-/// 4분할 화면 모드 (낙관적 업데이트).
-/// 플레이어가 카드를 놓으면 즉시 다음 라운드로 진행.
-/// AI 3명은 각자 독립 큐에서 비동기로 계산·배치.
-/// 레이아웃: 플레이어 좌측 절반 / AI1·2·3 우측 1/3씩.
+/// 1대1 모드. 화면 전체를 좌·우 절반으로 나눠 플레이어(왼쪽) / AI(오른쪽)를 표시합니다.
 /// </summary>
 [DefaultExecutionOrder(-1000)]
 public class StreamsGameFlowController : MonoBehaviour
@@ -16,38 +14,49 @@ public class StreamsGameFlowController : MonoBehaviour
     [Header("필수 연결")]
     public Camera mainCamera;
     public num_path playerBoard;
-    public num_path[] aiBoards = new num_path[3];
-    [Tooltip("AI 판 1·2·3 순서. 기본은 MCTS(useMcts); ONNX 쓰려면 해당 컴포넌트에서 useMcts 끄고 모델 할당.")]
+    [Tooltip("비우면 Ai Boards[0] 또는 GameBoard_AI의 num_path를 찾습니다.")]
+    public num_path aiBoard;
+    [Tooltip("하위 호환. 첫 번째만 사용합니다.")]
+    public num_path[] aiBoards = new num_path[1];
+
+    [Header("AI")]
+    [Tooltip("비우면 StartScene 선택 난이도 또는 Ai Models[0] 사용.")]
+    public StreamsAIController aiModel;
     public StreamsAIController[] aiModels = new StreamsAIController[3];
 
-    [Header("4분할 카메라 (비워 두면 mainCamera 복제해 자동 생성)")]
-    [Tooltip("0=플레이어(좌측절반), 1=AI1(우상), 2=AI2(우중), 3=AI3(우하). 비워 두면 자동 생성.")]
-    public Camera[] boardCameras = new Camera[4];
+    [Header("카메라")]
+    [Tooltip("비우면 Main Camera 사용 (왼쪽 절반).")]
+    public Camera playerCamera;
+    [Tooltip("비우면 런타임에 자동 생성 (오른쪽 절반).")]
+    public Camera aiCamera;
 
-    [Header("카메라 (GameBoard_0~3 기준)")]
+    [Header("카메라 포즈")]
     public Vector3 cameraLocalPosition = Vector3.zero;
     public Vector3 cameraLocalEuler = new Vector3(90f, 0f, 0f);
-
-    [Header("탑다운 카메라 (GameBoard 부모 없을 때만)")]
     public float topDownMinHeightAboveBoard = 38f;
     public float topDownExtentScale = 1.15f;
 
-    [Header("AI 입력(학습 파이프라인과 맞추기)")]
-    [Tooltip("빈 칸: -1. 조커 카드의 정수 표현.")]
+    [Header("AI 입력")]
     public int jokerModelValue = 21;
 
     [Header("게임 종료")]
-    public string endSceneName = "EndScene";
-    public float endSceneDelay = 1.5f;
+    public string startSceneName = "StartScene";
+    [Tooltip("비우면 씬에서 이름 EndButton을 찾습니다. 누르면 StartScene으로 갑니다.")]
+    public Button endButton;
+    [Tooltip("비우면 씬에서 이름 NextButton을 찾습니다. 대전 종료 후 켜지고, 누르면 ResultCanvas를 띄웁니다.")]
+    public Button nextButton;
+    [Tooltip("비우면 씬에서 이름 ResultCanvas를 찾습니다.")]
+    public Canvas resultCanvas;
 
-    // 플레이어: 좌측 절반 / AI1~3: 우측 열을 1/3씩
-    static readonly Rect[] k_SplitRects = new Rect[]
-    {
-        new Rect(0f,   0.5f, 0.5f, 0.5f), // 0: 플레이어 (좌상)
-        new Rect(0.5f, 0.5f, 0.5f, 0.5f), // 1: AI1      (우상)
-        new Rect(0f,   0f,   0.5f, 0.5f), // 2: AI2      (좌하)
-        new Rect(0.5f, 0f,   0.5f, 0.5f), // 3: AI3      (우하)
-    };
+    const string EndButtonObjectName = "EndButton";
+    const string NextButtonObjectName = "NextButton";
+    const string ResultCanvasName = "ResultCanvas";
+    const string WinnerTextObjectName = "WinnerText";
+    const string BoardCanvasName = "BoardCanvas";
+    const string LegacyBoardsRootName = "GameBoards";
+
+    public Camera PlayerCamera => playerCamera;
+    public Camera AiCamera => aiCamera;
 
     struct AiJob
     {
@@ -55,37 +64,110 @@ public class StreamsGameFlowController : MonoBehaviour
         public List<string> deckSnapshot;
     }
 
-    Queue<AiJob>[] _aiQueues;
+    readonly Queue<AiJob> _aiQueue = new Queue<AiJob>();
+    int _aiJobsInFlight;
     bool _gameEnded;
     bool _waitingForPlayer;
+    Button _resultEndButton;
+    string _winnerTextOverride;
 
     void Awake()
     {
         foreach (var r in FindObjectsByType<randomoutnum>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             r.enabled = false;
-    }
 
-    void Start()
-    {
+        ResolveBoards();
+        ResolveAiModel();
+
         if (playerBoard != null)
         {
             playerBoard.isPlayerControlledBoard = true;
             playerBoard.OnPlayerCardPlaced += OnPlayerCardPlaced;
+            playerBoard.EnsureUiSlotsBound();
         }
 
-        if (aiBoards != null)
-            foreach (var ai in aiBoards)
-                if (ai != null) ai.isPlayerControlledBoard = false;
-
-        _aiQueues = new Queue<AiJob>[3];
-        for (int i = 0; i < 3; i++)
+        if (AiBoard != null)
         {
-            _aiQueues[i] = new Queue<AiJob>();
-            StartCoroutine(AiWorker(i));
+            AiBoard.isPlayerControlledBoard = false;
+            AiBoard.EnsureUiSlotsBound();
         }
 
-        SetupSplitScreenCameras();
+        BindResultCanvas();
+    }
+
+    void Start()
+    {
+        StreamsGameResults.Clear();
+        BindHudButtons();
+        EnsureBoardDimmer();
+        SetupHalfScreenCameras();
+        StartCoroutine(ApplyBoardDimmingAfterInitRoutine());
+
+        if (StreamsTutorialSelection.IsActive)
+        {
+            var tutorial = GetComponent<StreamsTutorialController>();
+            if (tutorial == null)
+                tutorial = gameObject.AddComponent<StreamsTutorialController>();
+            tutorial.Begin(this);
+            return;
+        }
+
+        StartCoroutine(AiWorker());
         StartCoroutine(GameLoopRoutine());
+    }
+
+    num_path AiBoard
+    {
+        get
+        {
+            if (aiBoard != null)
+                return aiBoard;
+            if (aiBoards != null && aiBoards.Length > 0 && aiBoards[0] != null)
+                return aiBoards[0];
+            return null;
+        }
+    }
+
+    public num_path OpponentBoard => AiBoard;
+
+    void ResolveBoards()
+    {
+        if (aiBoard == null && aiBoards != null && aiBoards.Length > 0)
+            aiBoard = aiBoards[0];
+
+        if (aiBoard != null)
+            return;
+
+        var aiRoot = GameObject.Find("GameBoard_AI");
+        if (aiRoot != null)
+            aiBoard = aiRoot.GetComponentInChildren<num_path>(true);
+    }
+
+    void ResolveAiModel()
+    {
+        if (aiModel != null)
+            return;
+
+        var target = StreamsOpponentSelection.HasSelection
+            ? StreamsOpponentSelection.SelectedOpponent
+            : StreamsAiMctsPerformance.Normal;
+
+        if (aiModels != null)
+        {
+            foreach (var candidate in aiModels)
+            {
+                if (candidate == null)
+                    continue;
+
+                bool selected = candidate.mctsPerformance == target;
+                candidate.gameObject.SetActive(selected);
+                if (selected)
+                    aiModel = candidate;
+            }
+        }
+
+        if (aiModel == null && aiModels != null && aiModels.Length > 0)
+            aiModel = aiModels[0];
     }
 
     void OnDestroy()
@@ -93,54 +175,110 @@ public class StreamsGameFlowController : MonoBehaviour
         _gameEnded = true;
         if (playerBoard != null)
             playerBoard.OnPlayerCardPlaced -= OnPlayerCardPlaced;
+
+        if (endButton != null)
+            endButton.onClick.RemoveListener(OnEndButtonPressed);
+        if (_resultEndButton != null)
+            _resultEndButton.onClick.RemoveListener(OnEndButtonPressed);
+        if (nextButton != null)
+            nextButton.onClick.RemoveListener(OnNextButtonPressed);
     }
 
     void OnPlayerCardPlaced() => _waitingForPlayer = false;
 
-    // ──────────────────────────────────────────────
-    // 카메라 4분할 설정
-    // ──────────────────────────────────────────────
-
-    void SetupSplitScreenCameras()
+    void EnsureBoardDimmer()
     {
-        if (mainCamera == null) return;
-
-        if (boardCameras == null || boardCameras.Length != 4)
-            boardCameras = new Camera[4];
-
-        num_path[] allBoards = new num_path[4];
-        allBoards[0] = playerBoard;
-        for (int i = 0; i < 3; i++)
-            allBoards[i + 1] = (aiBoards != null && i < aiBoards.Length) ? aiBoards[i] : null;
-
-        for (int i = 0; i < 4; i++)
+        var dimmer = FindFirstObjectByType<StreamsBoardBackgroundDimmer>();
+        if (dimmer == null)
         {
-            if (boardCameras[i] == null)
-            {
-                if (i == 0)
-                {
-                    boardCameras[0] = mainCamera;
-                }
-                else
-                {
-                    var go = new GameObject($"BoardCamera_{i}");
-                    var cam = go.AddComponent<Camera>();
-                    cam.clearFlags      = mainCamera.clearFlags;
-                    cam.backgroundColor = mainCamera.backgroundColor;
-                    cam.cullingMask     = mainCamera.cullingMask;
-                    cam.fieldOfView     = mainCamera.fieldOfView;
-                    cam.nearClipPlane   = mainCamera.nearClipPlane;
-                    cam.farClipPlane    = mainCamera.farClipPlane;
-                    cam.depth           = mainCamera.depth + i;
-                    boardCameras[i]     = cam;
-                }
-            }
-
-            boardCameras[i].rect = k_SplitRects[i];
-
-            if (allBoards[i] != null)
-                PositionCamera(boardCameras[i], allBoards[i]);
+            var gameBoards = GameObject.Find("GameBoards");
+            if (gameBoards == null)
+                return;
+            dimmer = gameBoards.AddComponent<StreamsBoardBackgroundDimmer>();
         }
+
+        dimmer.brightBoardName = "GameBoard_Player";
+    }
+
+    IEnumerator ApplyBoardDimmingAfterInitRoutine()
+    {
+        yield return null;
+        yield return new WaitForEndOfFrame();
+        FindFirstObjectByType<StreamsBoardBackgroundDimmer>()?.Apply();
+    }
+
+    void SetupHalfScreenCameras()
+    {
+        CleanupLegacySplitCameras();
+
+        if (playerCamera == null)
+            playerCamera = mainCamera != null ? mainCamera : Camera.main;
+
+        if (playerCamera == null)
+        {
+            Debug.LogError("StreamsGameFlowController: 카메라가 없습니다.");
+            return;
+        }
+
+        if (aiCamera == null)
+            aiCamera = CreateSplitCamera(playerCamera, "StreamsAiCamera");
+
+        StreamsHalfScreenLayout.ApplyCameraViewport(playerCamera, StreamsHalfScreenLayout.PlayerViewport);
+        StreamsHalfScreenLayout.ApplyCameraViewport(aiCamera, StreamsHalfScreenLayout.AiViewport);
+
+        if (playerBoard != null)
+            PositionCamera(playerCamera, playerBoard);
+        if (AiBoard != null)
+            PositionCamera(aiCamera, AiBoard);
+
+        StreamsHalfScreenLayout.BindWorldCanvas(FindBoardCanvas(playerBoard), playerCamera);
+        StreamsHalfScreenLayout.BindWorldCanvas(FindBoardCanvas(AiBoard), aiCamera);
+
+        DisableAllCamerasExcept(playerCamera, aiCamera);
+    }
+
+    static void CleanupLegacySplitCameras()
+    {
+        foreach (var cam in FindObjectsByType<Camera>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (cam == null)
+                continue;
+
+            string name = cam.gameObject.name;
+            if (name.StartsWith("BoardCamera_") || name.StartsWith("DuelAiCamera"))
+            {
+                if (Application.isPlaying)
+                    Destroy(cam.gameObject);
+            }
+        }
+    }
+
+    static void DisableAllCamerasExcept(Camera playerCam, Camera aiCam)
+    {
+        foreach (var cam in FindObjectsByType<Camera>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (cam == null)
+                continue;
+
+            bool keep = cam == playerCam || cam == aiCam;
+            cam.enabled = keep;
+            if (keep)
+                cam.targetTexture = null;
+        }
+    }
+
+    static Camera CreateSplitCamera(Camera template, string objectName)
+    {
+        var go = new GameObject(objectName);
+        var cam = go.AddComponent<Camera>();
+        cam.clearFlags = template.clearFlags;
+        cam.backgroundColor = template.backgroundColor;
+        cam.cullingMask = template.cullingMask;
+        cam.fieldOfView = template.fieldOfView;
+        cam.nearClipPlane = template.nearClipPlane;
+        cam.farClipPlane = template.farClipPlane;
+        cam.depth = template.depth + 1;
+        return cam;
     }
 
     void PositionCamera(Camera cam, num_path board)
@@ -155,11 +293,17 @@ public class StreamsGameFlowController : MonoBehaviour
             out Vector3 pos,
             out Quaternion rot);
         cam.transform.SetPositionAndRotation(pos, rot);
+        StreamsHalfScreenLayout.FitCameraToBoardCanvas(cam, board.transform);
     }
 
-    // ──────────────────────────────────────────────
-    // 메인 게임 루프 (플레이어 전용, AI를 기다리지 않음)
-    // ──────────────────────────────────────────────
+    static Canvas FindBoardCanvas(num_path board)
+    {
+        if (board == null)
+            return null;
+
+        Transform anchor = StreamsBoardCameraPose.TryFindGameBoardAnchor(board.transform);
+        return anchor != null ? anchor.GetComponentInChildren<Canvas>(true) : null;
+    }
 
     IEnumerator GameLoopRoutine()
     {
@@ -167,6 +311,12 @@ public class StreamsGameFlowController : MonoBehaviour
         if (playerBoard == null)
         {
             Debug.LogError("StreamsGameFlowController: playerBoard가 없습니다.");
+            yield break;
+        }
+
+        if (AiBoard == null)
+        {
+            Debug.LogError("StreamsGameFlowController: aiBoard가 없습니다.");
             yield break;
         }
 
@@ -183,128 +333,299 @@ public class StreamsGameFlowController : MonoBehaviour
             deck.RemoveAt(pick);
 
             _waitingForPlayer = true;
-            // #region agent log
-            StreamsAgentLog.Line("H00", "StreamsGameFlow.GameLoopRoutine", "before playerBoard.ReceiveCard", $"{{\"currentCard\":\"{StreamsAgentLog.Esc(currentCard)}\"}}");
-            // #endregion
+            yield return StreamsCardDrawCinematic.PlayNow(currentCard);
             playerBoard.ReceiveCard(currentCard);
 
-            // 플레이어가 놓을 때까지만 대기
             while (_waitingForPlayer)
                 yield return null;
 
-            // AI 큐에 작업 추가 후 즉시 다음 라운드 진행 (낙관적 업데이트)
-            var deckSnapshot = new List<string>(deck);
-            for (int a = 0; a < aiBoards.Length; a++)
-            {
-                if (aiBoards[a] == null) continue;
-                _aiQueues[a].Enqueue(new AiJob { card = currentCard, deckSnapshot = deckSnapshot });
-            }
+            _aiQueue.Enqueue(new AiJob { card = currentCard, deckSnapshot = new List<string>(deck) });
         }
 
-        // 게임 루프 종료 — AI 큐가 모두 비워질 때까지 대기 후 결과 저장
         _gameEnded = true;
-        yield return WaitForAllAiQueues();
+        yield return WaitForAllAiWork();
 
-        StreamsGameResults.SaveFromBoards(playerBoard, aiBoards);
+        StreamsGameResults.SaveFromDuel(playerBoard, AiBoard);
 
-        if (endSceneDelay > 0f)
-            yield return new WaitForSeconds(endSceneDelay);
-
-        if (!string.IsNullOrWhiteSpace(endSceneName))
-            SceneManager.LoadScene(endSceneName);
+        if (nextButton != null)
+            nextButton.gameObject.SetActive(true);
+        else
+            ShowResultCanvas();
     }
 
-    IEnumerator WaitForAllAiQueues()
+    void BindHudButtons()
     {
-        bool anyPending;
-        do
-        {
-            anyPending = false;
-            for (int a = 0; a < _aiQueues.Length; a++)
-                if (_aiQueues[a].Count > 0) { anyPending = true; break; }
-            if (anyPending) yield return null;
-        } while (anyPending);
+        if (endButton == null)
+            endButton = FindNamedButton(EndButtonObjectName);
+        if (nextButton == null)
+            nextButton = FindNamedButton(NextButtonObjectName);
+
+        WireButton(endButton, OnEndButtonPressed, hide: false);
+        WireButton(nextButton, OnNextButtonPressed, hide: true);
+        BindResultCanvas();
     }
 
-    // ──────────────────────────────────────────────
-    // AI 비동기 워커 (보드 1개에 1개 코루틴)
-    // ──────────────────────────────────────────────
+    static void WireButton(Button button, UnityEngine.Events.UnityAction onClick, bool hide)
+    {
+        if (button == null)
+            return;
 
-    IEnumerator AiWorker(int a)
+        var sceneLoader = button.GetComponent<SceneButtonLoader>();
+        if (sceneLoader != null)
+            sceneLoader.enabled = false;
+
+        button.onClick.RemoveListener(onClick);
+        button.onClick.AddListener(onClick);
+        if (hide)
+            button.gameObject.SetActive(false);
+        else
+            button.gameObject.SetActive(true);
+    }
+
+    static Button FindNamedButton(string objectName)
+    {
+        Button fallback = null;
+        foreach (var button in FindObjectsByType<Button>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (button == null || button.name != objectName)
+                continue;
+
+            if (IsUnderNamedParent(button.transform, LegacyBoardsRootName))
+                continue;
+
+            if (IsUnderNamedParent(button.transform, BoardCanvasName))
+                return button;
+
+            fallback = button;
+        }
+
+        return fallback;
+    }
+
+    static bool IsUnderNamedParent(Transform start, string parentName)
+    {
+        for (Transform t = start; t != null; t = t.parent)
+        {
+            if (t.name == parentName)
+                return true;
+        }
+
+        return false;
+    }
+
+    void OnEndButtonPressed()
+    {
+        if (string.IsNullOrWhiteSpace(startSceneName))
+            return;
+
+        StreamsTutorialSelection.Clear();
+        StreamsSceneTransition.Load(startSceneName);
+    }
+
+    /// <summary>튜토리얼이 NextButton / 결과 화면을 쓸 수 있게 점수를 확정합니다.</summary>
+    public void PrepareTutorialResult(string winnerText)
+    {
+        _winnerTextOverride = winnerText;
+        _gameEnded = true;
+        StreamsGameResults.SaveFromDuel(playerBoard, AiBoard);
+    }
+
+    public void ShowTutorialResult()
+    {
+        ShowResultCanvas();
+    }
+
+    void OnNextButtonPressed()
+    {
+        if (!_gameEnded)
+            return;
+
+        ShowResultCanvas();
+    }
+
+    void BindResultCanvas()
+    {
+        if (resultCanvas == null)
+            resultCanvas = FindNamedCanvas(ResultCanvasName);
+
+        if (resultCanvas == null)
+            return;
+
+        resultCanvas.sortingOrder = Mathf.Max(resultCanvas.sortingOrder, 50);
+        resultCanvas.gameObject.SetActive(false);
+
+        if (_resultEndButton == null)
+            _resultEndButton = FindNamedButtonUnder(resultCanvas.transform, EndButtonObjectName);
+
+        WireButton(_resultEndButton, OnEndButtonPressed, hide: false);
+    }
+
+    void ShowResultCanvas()
+    {
+        if (resultCanvas == null)
+            BindResultCanvas();
+        if (resultCanvas == null)
+        {
+            Debug.LogWarning("StreamsGameFlowController: ResultCanvas가 없습니다.");
+            return;
+        }
+
+        resultCanvas.gameObject.SetActive(true);
+        FillWinnerText();
+
+        var overlay = resultCanvas.GetComponent<StreamsResultOverlay>();
+        if (overlay == null)
+            overlay = resultCanvas.gameObject.AddComponent<StreamsResultOverlay>();
+        overlay.Play();
+    }
+
+    void FillWinnerText()
+    {
+        TextMeshProUGUI label = FindNamedTmpUnder(resultCanvas != null ? resultCanvas.transform : null, WinnerTextObjectName);
+        if (label == null)
+            return;
+
+        if (!string.IsNullOrEmpty(_winnerTextOverride))
+        {
+            label.text = _winnerTextOverride;
+            return;
+        }
+
+        int playerScore = StreamsGameResults.PlayerScore;
+        int aiScore = StreamsGameResults.OpponentScore;
+        if (playerScore > aiScore)
+            label.text = "플레이어 승리!";
+        else if (aiScore > playerScore)
+            label.text = "AI 승리!";
+        else
+            label.text = "무승부";
+    }
+
+    static Canvas FindNamedCanvas(string objectName)
+    {
+        foreach (var canvas in FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (canvas != null && canvas.name == objectName)
+                return canvas;
+        }
+
+        return null;
+    }
+
+    static Button FindNamedButtonUnder(Transform root, string objectName)
+    {
+        if (root == null)
+            return null;
+
+        foreach (var button in root.GetComponentsInChildren<Button>(true))
+        {
+            if (button != null && button.name == objectName)
+                return button;
+        }
+
+        return null;
+    }
+
+    static TextMeshProUGUI FindNamedTmpUnder(Transform root, string objectName)
+    {
+        if (root == null)
+            return null;
+
+        foreach (var tmp in root.GetComponentsInChildren<TextMeshProUGUI>(true))
+        {
+            if (tmp != null && tmp.name == objectName)
+                return tmp;
+        }
+
+        return null;
+    }
+
+    IEnumerator WaitForAllAiWork()
+    {
+        while (_aiQueue.Count > 0 || _aiJobsInFlight > 0)
+            yield return null;
+    }
+
+    IEnumerator AiWorker()
     {
         while (true)
         {
-            while (_aiQueues[a].Count == 0)
+            while (_aiQueue.Count == 0)
             {
-                if (_gameEnded) yield break;
+                if (_gameEnded && _aiJobsInFlight == 0)
+                    yield break;
                 yield return null;
             }
 
-            var job = _aiQueues[a].Dequeue();
-            var board = aiBoards[a];
-            var model = (aiModels != null && a < aiModels.Length) ? aiModels[a] : null;
+            var job = _aiQueue.Dequeue();
+            _aiJobsInFlight++;
 
-            // 현재 보드 상태 스냅샷 (메인 스레드에서)
-            int[] state = SnapshotBoardState(board);
-            int emptyCount = 0;
-            foreach (var v in state) if (v == -1) emptyCount++;
-            int futureTileCount = Mathf.Max(0, emptyCount - 1);
-
-            var remainingMcts = new List<int>(job.deckSnapshot.Count);
-            foreach (var s in job.deckSnapshot) remainingMcts.Add(CardStringToMctsInt(s));
-
-            int newTile = CardStringToModelInt(job.card);
-
-            // AI 계산을 백그라운드 스레드에서 실행 (메인 스레드 블로킹 방지)
-            int slot = -1;
-            if (model != null)
+            try
             {
-                var capturedState  = state;
-                var capturedDeck   = remainingMcts;
-                int capturedTile   = newTile;
-                int capturedFuture = futureTileCount;
-                int capturedJoker  = jokerModelValue;
+                var board = AiBoard;
+                if (aiModel == null)
+                    ResolveAiModel();
 
-                var task = Task.Run(() =>
-                    model.GetBestPosition(capturedState, capturedTile, capturedDeck, capturedFuture, capturedJoker));
+                int[] state = SnapshotBoardState(board);
+                int emptyCount = 0;
+                foreach (var v in state)
+                    if (v == -1) emptyCount++;
+                int futureTileCount = Mathf.Max(0, emptyCount - 1);
 
-                while (!task.IsCompleted) yield return null;
+                var remainingMcts = new List<int>(job.deckSnapshot.Count);
+                foreach (var s in job.deckSnapshot)
+                    remainingMcts.Add(CardStringToMctsInt(s));
 
-                if (task.IsFaulted)
+                int newTile = CardStringToModelInt(job.card);
+                int slot = -1;
+                float[] slotPercentages = null;
+
+                if (aiModel != null)
                 {
-                    Debug.LogWarning($"AI[{a}] 계산 오류, 첫 번째 빈 칸으로 대체: {task.Exception?.GetBaseException().Message}");
-                    slot = -1;
+                    var task = Task.Run(() =>
+                        aiModel.GetPositionDecision(state, newTile, remainingMcts, futureTileCount, jokerModelValue));
+
+                    while (!task.IsCompleted)
+                        yield return null;
+
+                    if (task.IsFaulted)
+                    {
+                        Debug.LogWarning($"AI 계산 오류: {task.Exception?.GetBaseException().Message}");
+                        slot = -1;
+                    }
+                    else
+                    {
+                        var decision = task.Result;
+                        slot = decision.BestPosition;
+                        slotPercentages = decision.SlotPercentages;
+                    }
                 }
-                else
-                {
-                    slot = task.Result;
-                }
+
+                if (slotPercentages != null && board != null)
+                    board.ShowSlotProbabilities(slotPercentages);
+
+                if (slot < 0 || slot >= board.SlotCount || board.IsSlotFilled(slot))
+                    slot = board.FirstEmptySlotIndex();
+
+                if (slot >= 0)
+                    board.PlaceCardFromAI(slot, job.card);
             }
-
-            // 메인 스레드에서 유효성 검증 후 배치
-            if (slot < 0 || slot >= board.slots.Count || board.slots[slot] == null || board.slots[slot].isFilled)
-                slot = FirstEmptySlotIndex(board);
-
-            if (slot >= 0)
-                board.PlaceCardFromAI(slot, job.card);
+            finally
+            {
+                _aiJobsInFlight--;
+            }
         }
     }
 
-    // ──────────────────────────────────────────────
-    // 유틸리티
-    // ──────────────────────────────────────────────
-
     int[] SnapshotBoardState(num_path board)
     {
-        int n = Mathf.Min(20, board.slots.Count);
         var state = new int[20];
         for (int i = 0; i < 20; i++)
         {
-            if (i >= n || board.slots[i] == null || !board.slots[i].isFilled)
-                state[i] = -1;
-            else
-                state[i] = CardStringToModelInt(board.slots[i].cardValue);
+            string value = board.GetSlotCardValue(i);
+            state[i] = string.IsNullOrEmpty(value) ? -1 : CardStringToModelInt(value);
         }
+
         return state;
     }
 
@@ -326,13 +647,6 @@ public class StreamsGameFlowController : MonoBehaviour
         if (s == "J") return 0;
         if (int.TryParse(s, out int v)) return v;
         return 0;
-    }
-
-    int FirstEmptySlotIndex(num_path board)
-    {
-        for (int i = 0; i < board.slots.Count; i++)
-            if (board.slots[i] != null && !board.slots[i].isFilled) return i;
-        return -1;
     }
 
     int CardStringToModelInt(string s)

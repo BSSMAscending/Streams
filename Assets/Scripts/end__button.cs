@@ -1,6 +1,5 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
-using UnityEngine.SceneManagement;
 
 public class end__button : MonoBehaviour
 {
@@ -31,7 +30,8 @@ public class end__button : MonoBehaviour
 
     void HandleClick()
     {
-        Debug.Log("end__button_ 클릭됨");   
-        SceneManager.LoadScene("SampleScene");
+        Debug.Log("end__button_ 클릭됨");
+        StreamsGameResults.Clear();
+        StreamsSceneTransition.Load("SampleScene");
     }
 }
