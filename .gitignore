@@ -79,6 +79,9 @@ crashlytics-build.properties
 .DS_Store?
 ._*
 
+# Cursor local settings (machine-specific MCP paths)
+.cursor/
+
 # Custom build output
 StreamsBuild/
 StreamsBuild.zip
