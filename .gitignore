@@ -87,6 +87,3 @@ StreamsBuild.zip
 # .NET build output
 Tools/**/bin/
 Tools/**/obj/
-
-# Don't share personal agent settings
-.cursor/
