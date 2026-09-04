@@ -17,6 +17,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
     const int SortingOrder = 40;
     const float DimAlpha = 0.62f;
     const float HolePadding = 16f;
+    const float SlotSpritePadBottomExtra = 32f;
     const float TmpHolePadding = 8f;
     const float ImageHolePadding = 10f;
     const float CoachFontSize = 42f;
@@ -258,8 +259,8 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             if (targets[i] == null)
                 continue;
 
-            Rect hole = GetLocalRect(targets[i], out float padX, out float padY);
-            hole = Pad(hole, padX, padY);
+            Rect hole = GetLocalRect(targets[i], out float padX, out float padTop, out float padBottom);
+            hole = Pad(hole, padX, padTop, padBottom);
             hole = Intersect(canvasLocal, hole);
             if (hole.width < 1f || hole.height < 1f)
                 continue;
@@ -287,15 +288,27 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         }
 
         Rect highlight = Union(holes, canvasLocal);
-        float spaceLeft = highlight.xMin - canvasLocal.xMin - CoachGap;
-        float spaceRight = canvasLocal.xMax - highlight.xMax - CoachGap;
-        bool onRight = spaceRight >= spaceLeft;
-        if (onRight && spaceRight < CoachMinSide && spaceLeft > spaceRight)
-            onRight = false;
-        if (!onRight && spaceLeft < CoachMinSide && spaceRight > spaceLeft)
-            onRight = true;
+        Vector2 focus = WeightedCenter(holes, highlight.center);
+        bool highlightOnRight = focus.x >= canvasLocal.center.x;
+        bool onRight = !highlightOnRight;
 
-        float maxWidth = Mathf.Max(CoachMinSide, onRight ? spaceRight : spaceLeft);
+        float leftLimit = canvasLocal.xMin + CoachGap;
+        float rightLimit = canvasLocal.xMax - CoachGap;
+        float needed = Mathf.Min(CoachMaxLineWidth, canvasLocal.width * 0.5f - CoachGap);
+        float textLeft;
+        float textRight;
+        if (onRight)
+        {
+            textLeft = Mathf.Clamp(highlight.xMax + CoachGap, leftLimit, rightLimit - needed);
+            textRight = rightLimit;
+        }
+        else
+        {
+            textRight = Mathf.Clamp(highlight.xMin - CoachGap, leftLimit + needed, rightLimit);
+            textLeft = leftLimit;
+        }
+
+        float maxWidth = Mathf.Max(CoachMinSide, textRight - textLeft);
         float wrapWidth = Mathf.Min(maxWidth, CoachMaxLineWidth);
         string wrapped = WrapToWidth(_coach, _coachSource, wrapWidth);
         _coach.text = wrapped;
@@ -312,8 +325,8 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         rt.pivot = onRight ? new Vector2(0f, 1f) : new Vector2(1f, 1f);
         rt.sizeDelta = new Vector2(boxW, boxH);
         rt.anchoredPosition = onRight
-            ? new Vector2(highlight.xMax + CoachGap, highlight.yMax)
-            : new Vector2(highlight.xMin - CoachGap, highlight.yMax);
+            ? new Vector2(textLeft, highlight.yMax)
+            : new Vector2(textRight, highlight.yMax);
 
         _coach.gameObject.SetActive(true);
         if (_coachRoot != null)
@@ -387,6 +400,25 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         return line.Length;
     }
 
+    static Vector2 WeightedCenter(List<Rect> rects, Vector2 fallback)
+    {
+        if (rects == null || rects.Count == 0)
+            return fallback;
+
+        float ax = 0f;
+        float ay = 0f;
+        float area = 0f;
+        for (int i = 0; i < rects.Count; i++)
+        {
+            float a = Mathf.Max(1f, rects[i].width * rects[i].height);
+            ax += rects[i].center.x * a;
+            ay += rects[i].center.y * a;
+            area += a;
+        }
+
+        return area > 0f ? new Vector2(ax / area, ay / area) : fallback;
+    }
+
     static Rect Union(List<Rect> rects, Rect fallback)
     {
         if (rects == null || rects.Count == 0)
@@ -423,36 +455,41 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         rt.sizeDelta = localRect.size;
     }
 
-    Rect GetLocalRect(RectTransform target, out float padX, out float padY)
+    Rect GetLocalRect(RectTransform target, out float padX, out float padTop, out float padBottom)
     {
         Vector3[] corners = new Vector3[4];
         padX = HolePadding;
-        padY = HolePadding;
+        padTop = HolePadding;
+        padBottom = HolePadding;
 
         var slot = target.GetComponent<StreamsUiSlot>();
         if (slot == null)
             slot = target.GetComponentInParent<StreamsUiSlot>();
 
-        bool visual = slot != null && slot.TryGetVisualWorldCorners(corners);
+        bool visual = slot != null && slot.TryGetVisualWorldCorners(corners, SlotSpritePadBottomExtra);
+
         if (!visual && TryGetButtonWorldCorners(target, corners))
         {
             visual = true;
             padX = ImageHolePadding;
-            padY = 0f;
+            padTop = 0f;
+            padBottom = 0f;
         }
 
         if (!visual && TryGetTmpWorldCorners(target, corners))
         {
             visual = true;
             padX = TmpHolePadding;
-            padY = TmpHolePadding;
+            padTop = TmpHolePadding;
+            padBottom = TmpHolePadding;
         }
 
         if (!visual && TryGetImageWorldCorners(target, corners))
         {
             visual = true;
             padX = ImageHolePadding;
-            padY = ImageHolePadding;
+            padTop = ImageHolePadding;
+            padBottom = ImageHolePadding;
         }
 
         if (!visual)
@@ -591,9 +628,9 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         return canvas.worldCamera != null ? canvas.worldCamera : worldCamera;
     }
 
-    static Rect Pad(Rect rect, float padX, float padY)
+    static Rect Pad(Rect rect, float padX, float padTop, float padBottom)
     {
-        return Rect.MinMaxRect(rect.xMin - padX, rect.yMin - padY, rect.xMax + padX, rect.yMax + padY);
+        return Rect.MinMaxRect(rect.xMin - padX, rect.yMin - padBottom, rect.xMax + padX, rect.yMax + padTop);
     }
 
     static Rect Intersect(Rect a, Rect b)

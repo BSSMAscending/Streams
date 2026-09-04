@@ -332,7 +332,7 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
     }
 
     /// <summary>카드 그림이 있는 영역(512 스프라이트에서 투명 여백을 뺀 네 모서리, 월드).</summary>
-    public bool TryGetVisualWorldCorners(Vector3[] corners)
+    public bool TryGetVisualWorldCorners(Vector3[] corners, float extraBottomSpritePx = 0f)
     {
         if (corners == null || corners.Length < 4)
             return false;
@@ -344,10 +344,11 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
         Rect sr = rt.rect;
         float sx = sr.width / VisualSpriteSize;
         float sy = sr.height / VisualSpriteSize;
-        corners[0] = rt.TransformPoint(new Vector3(sr.xMin + VisualPadLeft * sx, sr.yMin + VisualPadBottom * sy, 0f));
+        float bottomPad = Mathf.Max(0f, VisualPadBottom - extraBottomSpritePx);
+        corners[0] = rt.TransformPoint(new Vector3(sr.xMin + VisualPadLeft * sx, sr.yMin + bottomPad * sy, 0f));
         corners[1] = rt.TransformPoint(new Vector3(sr.xMin + VisualPadLeft * sx, sr.yMax - VisualPadTop * sy, 0f));
         corners[2] = rt.TransformPoint(new Vector3(sr.xMax - VisualPadRight * sx, sr.yMax - VisualPadTop * sy, 0f));
-        corners[3] = rt.TransformPoint(new Vector3(sr.xMax - VisualPadRight * sx, sr.yMin + VisualPadBottom * sy, 0f));
+        corners[3] = rt.TransformPoint(new Vector3(sr.xMax - VisualPadRight * sx, sr.yMin + bottomPad * sy, 0f));
         return true;
     }
 }

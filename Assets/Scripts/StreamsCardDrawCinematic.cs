@@ -25,7 +25,7 @@ public class StreamsCardDrawCinematic : MonoBehaviour
     public RectTransform pocket;
     [Tooltip("주머니 Image. 비우면 런타임에 만듭니다.")]
     public Image pocketImage;
-    [Tooltip("오른쪽 아래 스킵 안내. 비우면 런타임에 만듭니다.")]
+    [Tooltip("왼쪽 아래 스킵 안내. 비우면 런타임에 만듭니다.")]
     public TextMeshProUGUI skipHint;
 
     [Header("타이밍")]
@@ -862,17 +862,17 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         go.transform.SetParent(transform, false);
 
         var rt = go.GetComponent<RectTransform>();
-        rt.anchorMin = rt.anchorMax = new Vector2(1f, 0f);
-        rt.pivot = new Vector2(1f, 0f);
+        rt.anchorMin = rt.anchorMax = new Vector2(0f, 0f);
+        rt.pivot = new Vector2(0f, 0f);
         rt.sizeDelta = new Vector2(1120f, 112f);
-        rt.anchoredPosition = new Vector2(-40f, 32f);
+        rt.anchoredPosition = new Vector2(40f, 32f);
         rt.localScale = Vector3.one;
 
         skipHint = go.GetComponent<TextMeshProUGUI>();
         skipHint.text = SkipHintText;
         skipHint.fontSize = 64;
         skipHint.color = new Color(1f, 1f, 1f, SkipHintAlpha);
-        skipHint.alignment = TextAlignmentOptions.BottomRight;
+        skipHint.alignment = TextAlignmentOptions.BottomLeft;
         skipHint.raycastTarget = false;
         skipHint.enableWordWrapping = false;
         skipHint.overflowMode = TextOverflowModes.Overflow;
