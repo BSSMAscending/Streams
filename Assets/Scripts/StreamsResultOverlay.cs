@@ -27,6 +27,10 @@ public class StreamsResultOverlay : MonoBehaviour
     BarAnim _ai;
     Coroutine _play;
 
+    public bool IsPlaying => _play != null;
+    public float PlayerBarRestHeight => _player.restHeight;
+    public float AiBarRestHeight => _ai.restHeight;
+
     public void Play()
     {
         if (_play != null)

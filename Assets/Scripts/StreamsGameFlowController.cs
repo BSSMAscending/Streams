@@ -423,9 +423,9 @@ public class StreamsGameFlowController : MonoBehaviour
     }
 
     /// <summary>튜토리얼이 NextButton / 결과 화면을 쓸 수 있게 점수를 확정합니다.</summary>
-    public void PrepareTutorialResult(string winnerText)
+    public void PrepareTutorialResult()
     {
-        _winnerTextOverride = winnerText;
+        _winnerTextOverride = null;
         _gameEnded = true;
         StreamsGameResults.SaveFromDuel(playerBoard, AiBoard);
     }

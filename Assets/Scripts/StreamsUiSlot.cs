@@ -88,6 +88,8 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
         StreamsDashedRectHint.SetSlotHint(this, false, hintColor);
     }
 
+    public int SlotIndex => _slotIndex;
+
     public void BindPlacement(int index, System.Action<int> onPlace, bool playerControlled)
     {
         _slotIndex = index;
@@ -169,9 +171,14 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
 
     void OnValidate()
     {
-        if (!Application.isPlaying)
+        if (!Application.isPlaying || !CanMutateHierarchy())
             return;
         EnsureHitArea();
+    }
+
+    bool CanMutateHierarchy()
+    {
+        return gameObject.scene.IsValid();
     }
 
     void EnsureHitArea()
@@ -192,6 +199,8 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
         targetImage.raycastTarget = false;
         if (_hitArea == null)
             _hitArea = CreateHitArea();
+        if (_hitArea == null)
+            return;
 
         _hitArea.gameObject.SetActive(true);
         _hitArea.raycastTarget = true;
@@ -222,6 +231,9 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
             existing.name = "HitArea";
             return image;
         }
+
+        if (!CanMutateHierarchy())
+            return null;
 
         var go = new GameObject("HitArea", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
         go.transform.SetParent(transform, false);

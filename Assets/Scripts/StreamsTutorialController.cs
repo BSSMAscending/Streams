@@ -8,8 +8,8 @@ public class StreamsTutorialController : MonoBehaviour
 {
     static readonly string[] RemainingCards =
     {
-        "3", "4", "5", "6", "7", "8", "9", "10", "11",
-        "12", "12", "13", "13", "14", "15", "16", "17"
+        "4", "6", "7", "11",
+        "12", "12", "13", "13", "15", "17", "18", "19", "22", "23", "26", "29", "30"
     };
 
     StreamsGameFlowController _flow;
@@ -42,18 +42,23 @@ public class StreamsTutorialController : MonoBehaviour
 
         var board = _flow.playerBoard;
         board.EnsureUiSlotsBound();
+        _flow.OpponentBoard?.EnsureUiSlotsBound();
         _spotlight = StreamsTutorialSpotlight.Ensure();
 
         yield return null;
         yield return new WaitForEndOfFrame();
 
         yield return DrawAndPlace(board, "1", 0, "기차 칸을 눌러 카드를 배치해 보세요.");
-        yield return ShowMessageOn(ScoreTargets(board), "카드를 배치해서 점수를 얻었습니다.");
+        yield return ShowMessageOn(
+            ScoreAndSlots(board, 0),
+            "카드를 배치해서 점수를 얻었습니다.",
+            ScoreAnchor(board));
 
         yield return DrawAndPlace(board, "2", 1, "기차 칸을 눌러 카드를 배치해 보세요.");
         yield return ShowMessageOn(
             ScoreAndSlots(board, 0, 1),
-            "숫자를 오름차순으로 배치하면 얻는 점수가 더 늘어납니다.");
+            "숫자를 오름차순으로 배치하면 얻는 점수가 더 늘어납니다.",
+            ScoreAnchor(board));
 
         yield return DrawAndPlace(board, "J", 2, "조커 카드! 어디에 배치해도 오름차순으로 인정돼요.");
 
@@ -61,12 +66,17 @@ public class StreamsTutorialController : MonoBehaviour
         board.ClearAllowedPlacementSlot();
         yield return AutoFillRemaining(board);
         yield return ShowMessageOn(
+            BoardTargets(board),
+            "카드는 1~30 카드와 조커카드가 있어요.");
+        yield return ShowMessageOn(
             FindSlotsWithValues(board, "12", "13"),
-            "10~19 카드는 2개씩 들어있어요.");
+            "11~19 카드는 2개씩 들어있어요.");
 
-        _flow.PrepareTutorialResult("AI보다 더 높은 점수를 획득하면 승리해요!");
+        _flow.PrepareTutorialResult();
         yield return WaitForResultButton();
         _spotlight.Hide();
+        yield return ShowResultGraphMessage();
+        yield return ShowResultEndButton();
     }
 
     IEnumerator DrawAndPlace(num_path board, string card, int slotIndex, string message)
@@ -99,11 +109,58 @@ public class StreamsTutorialController : MonoBehaviour
         PlaceAiRandom(card);
     }
 
-    IEnumerator ShowMessageOn(IList<RectTransform> targets, string message)
+    IEnumerator ShowMessageOn(IList<RectTransform> targets, string message, RectTransform coachAnchor = null)
     {
-        _spotlight.Show(targets, message, blockClicks: true, worldCamera: _flow.PlayerCamera);
+        _spotlight.Show(targets, message, blockClicks: true, worldCamera: _flow.PlayerCamera, coachAnchor: coachAnchor);
         yield return _spotlight.WaitForTap();
         _spotlight.Hide();
+    }
+
+    IEnumerator ShowResultGraphMessage()
+    {
+        Canvas result = _flow != null ? _flow.resultCanvas : null;
+        if (result != null)
+            _spotlight.RaiseAbove(result);
+
+        yield return null;
+
+        var overlay = result != null ? result.GetComponent<StreamsResultOverlay>() : null;
+        float playerRest = overlay != null ? overlay.PlayerBarRestHeight : 0f;
+        float aiRest = overlay != null ? overlay.AiBarRestHeight : 0f;
+        _spotlight.SetGraphBarRestHeights(playerRest, aiRest);
+        _spotlight.SetHoleCenter(FindNamedDeep(result != null ? result.transform : null, "Background") as RectTransform);
+
+        _spotlight.Show(
+            ResultGraphTargets(result),
+            "점수가 더 높으면 승리합니다.",
+            blockClicks: true,
+            worldCamera: null,
+            mergeHoles: true,
+            followTargets: true);
+        yield return _spotlight.WaitForTap();
+        _spotlight.Hide();
+    }
+
+    IEnumerator ShowResultEndButton()
+    {
+        Canvas result = _flow != null ? _flow.resultCanvas : null;
+        if (result != null)
+            _spotlight.RaiseAbove(result);
+
+        var endRt = FindNamedDeep(result != null ? result.transform : null, "EndButton") as RectTransform;
+        if (endRt == null)
+        {
+            _spotlight.Hide();
+            yield break;
+        }
+
+        _spotlight.Show(
+            new[] { endRt },
+            "",
+            blockClicks: false,
+            worldCamera: null);
+        while (result != null && result.gameObject.activeSelf)
+            yield return null;
     }
 
     IEnumerator AutoFillRemaining(num_path board)
@@ -122,7 +179,7 @@ public class StreamsTutorialController : MonoBehaviour
             if (aiIndex < aiSlots.Count)
                 PlaceAiAt(aiSlots[aiIndex++], RemainingCards[i]);
             slot++;
-            yield return new WaitForSeconds(0.06f);
+            yield return new WaitForSeconds(0.01f);
         }
     }
 
@@ -224,6 +281,29 @@ public class StreamsTutorialController : MonoBehaviour
         return list;
     }
 
+    static List<RectTransform> BoardTargets(num_path board)
+    {
+        var list = new List<RectTransform>();
+        if (board == null || board.uiSlots == null)
+            return list;
+
+        for (int i = 0; i < board.uiSlots.Count; i++)
+        {
+            var slot = board.uiSlots[i];
+            if (slot != null)
+                list.Add(slot.transform as RectTransform);
+        }
+
+        return list;
+    }
+
+    static RectTransform ScoreAnchor(num_path board)
+    {
+        return board != null && board.uiScoreLabel != null
+            ? board.uiScoreLabel.rectTransform
+            : null;
+    }
+
     static List<RectTransform> ScoreTargets(num_path board)
     {
         var list = new List<RectTransform>();
@@ -271,5 +351,50 @@ public class StreamsTutorialController : MonoBehaviour
         }
 
         return list;
+    }
+
+    static List<RectTransform> ResultGraphTargets(Canvas result)
+    {
+        var list = new List<RectTransform>();
+        if (result == null)
+            return list;
+
+        AddNamedRect(list, result.transform, "Bar_Player");
+        AddNamedRect(list, result.transform, "Bar_AI");
+        AddNamedRect(list, result.transform, "BarFloor");
+        AddNamedRect(list, result.transform, "PlayerScore");
+        AddNamedRect(list, result.transform, "AIScore");
+        AddNamedRect(list, result.transform, "PlayerName");
+        AddNamedRect(list, result.transform, "AIName");
+        return list;
+    }
+
+    static void AddNamedRect(List<RectTransform> list, Transform root, string objectName)
+    {
+        if (list == null || root == null || string.IsNullOrEmpty(objectName))
+            return;
+
+        Transform found = FindNamedDeep(root, objectName);
+        var rt = found as RectTransform;
+        if (rt != null)
+            list.Add(rt);
+    }
+
+    static Transform FindNamedDeep(Transform root, string objectName)
+    {
+        if (root == null)
+            return null;
+
+        for (int i = 0; i < root.childCount; i++)
+        {
+            Transform child = root.GetChild(i);
+            if (child.name == objectName)
+                return child;
+            Transform nested = FindNamedDeep(child, objectName);
+            if (nested != null)
+                return nested;
+        }
+
+        return null;
     }
 }
