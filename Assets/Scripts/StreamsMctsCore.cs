@@ -200,51 +200,136 @@ public static class StreamsMctsCore
             return empty[0];
         }
 
-        int nEmpty = empty.Count;
-        int nsim = nSimOverride ?? GetAdaptiveNsim(nEmpty);
+        var search = new MctsStepper(board, tile, remainingPool, futureTileCount, rng, nSimOverride);
+        while (!search.IsDone)
+            search.Advance(int.MaxValue);
 
-        var rem = new List<int>(remainingPool.Count);
-        foreach (var x in remainingPool) rem.Add(x);
+        var weights = search.Weights;
+        for (int i = 0; i < 20; i++)
+            outWeights[i] = weights[i];
+        return search.BestPosition;
+    }
 
-        int bestPos = empty[0];
-        double bestSc = -1.0;
+    /// <summary>
+    /// 메인 스레드에서 프레임마다 나눠 돌릴 수 있는 MCTS.
+    /// WebGL에는 스레드가 없어 <see cref="MctsPositionWithWeights"/>를 한 번에 돌리면 탭이 멈춥니다.
+    /// </summary>
+    public sealed class MctsStepper
+    {
+        readonly int[] _board = new int[20];
+        readonly int[] _baseBoard = new int[20];
+        readonly int[] _work = new int[20];
+        readonly float[] _weightValues = new float[20];
+        readonly List<int> _empty = new List<int>(20);
+        readonly List<int> _rem;
+        readonly int _tile;
+        readonly int _futureTileCount;
+        readonly Random _rng;
+        readonly int _nsim;
 
-        var baseBoard = new int[20];
-        var work = new int[20];
+        int _posIndex;
+        int _simIndex;
+        double _total;
+        double _bestScore = -1.0;
 
-        foreach (int pos in empty)
+        public bool IsDone { get; private set; }
+        public int BestPosition { get; private set; }
+        public float[] Weights => _weightValues;
+
+        public MctsStepper(int[] board, int tile, IList<int> remainingPool, int futureTileCount, Random rng, int? nSimOverride)
         {
-            Array.Copy(board, baseBoard, 20);
-            baseBoard[pos] = tile;
+            Array.Copy(board, _board, 20);
+            _tile = tile;
+            _futureTileCount = futureTileCount;
+            _rng = rng;
 
-            double total = 0.0;
-            for (int sim = 0; sim < nsim; sim++)
+            for (int i = 0; i < 20; i++)
             {
-                Shuffle(rem, rng);
-
-                Array.Copy(baseBoard, work, 20);
-
-                int useCount = futureTileCount < rem.Count ? futureTileCount : rem.Count;
-                for (int fi = 0; fi < useCount; fi++)
-                {
-                    int t2 = rem[fi];
-                    int p = GreedyPos(work, t2);
-                    if (p >= 0) work[p] = t2;
-                }
-
-                total += CalcScore(work);
+                _weightValues[i] = board[i] == -1 ? 0f : -1f;
+                if (board[i] == -1)
+                    _empty.Add(i);
             }
 
-            double avg = total / nsim;
-            outWeights[pos] = (float)avg;
-            if (avg > bestSc)
+            int count = remainingPool != null ? remainingPool.Count : 0;
+            _rem = new List<int>(count);
+            if (remainingPool != null)
             {
-                bestSc = avg;
-                bestPos = pos;
+                for (int i = 0; i < count; i++)
+                    _rem.Add(remainingPool[i]);
             }
+
+            if (_empty.Count == 0)
+            {
+                BestPosition = -1;
+                IsDone = true;
+                _nsim = 1;
+                return;
+            }
+
+            if (_empty.Count == 1)
+            {
+                _weightValues[_empty[0]] = 1f;
+                BestPosition = _empty[0];
+                IsDone = true;
+                _nsim = 1;
+                return;
+            }
+
+            int nsim = nSimOverride ?? GetAdaptiveNsim(_empty.Count);
+            _nsim = nsim < 1 ? 1 : nsim;
+            BestPosition = _empty[0];
         }
 
-        return bestPos;
+        public void Advance(int maxSims)
+        {
+            if (IsDone || maxSims <= 0)
+                return;
+
+            int ran = 0;
+            while (ran < maxSims && _posIndex < _empty.Count)
+            {
+                int pos = _empty[_posIndex];
+                if (_simIndex == 0)
+                {
+                    Array.Copy(_board, _baseBoard, 20);
+                    _baseBoard[pos] = _tile;
+                    _total = 0.0;
+                }
+
+                Shuffle(_rem, _rng);
+                Array.Copy(_baseBoard, _work, 20);
+
+                int useCount = _futureTileCount < _rem.Count ? _futureTileCount : _rem.Count;
+                for (int fi = 0; fi < useCount; fi++)
+                {
+                    int t2 = _rem[fi];
+                    int p = GreedyPos(_work, t2);
+                    if (p >= 0)
+                        _work[p] = t2;
+                }
+
+                _total += CalcScore(_work);
+                _simIndex++;
+                ran++;
+
+                if (_simIndex >= _nsim)
+                {
+                    double avg = _total / _nsim;
+                    _weightValues[pos] = (float)avg;
+                    if (avg > _bestScore)
+                    {
+                        _bestScore = avg;
+                        BestPosition = pos;
+                    }
+
+                    _simIndex = 0;
+                    _posIndex++;
+                }
+            }
+
+            if (_posIndex >= _empty.Count)
+                IsDone = true;
+        }
     }
 
     /// <summary>Python과 동일한 적응형 시뮬 횟수.</summary>

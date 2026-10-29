@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.UI;
 
 /// <summary>
-/// 1대1 모드. 화면 전체를 좌·우 절반으로 나눠 플레이어(왼쪽) / AI(오른쪽)를 표시합니다.
+/// 1대1 모드. BoardCanvas의 플레이어 / AI 보드로 대전을 진행합니다.
 /// </summary>
 [DefaultExecutionOrder(-1000)]
 public class StreamsGameFlowController : MonoBehaviour
@@ -23,18 +23,6 @@ public class StreamsGameFlowController : MonoBehaviour
     [Tooltip("비우면 StartScene 선택 난이도 또는 Ai Models[0] 사용.")]
     public StreamsAIController aiModel;
     public StreamsAIController[] aiModels = new StreamsAIController[3];
-
-    [Header("카메라")]
-    [Tooltip("비우면 Main Camera 사용 (왼쪽 절반).")]
-    public Camera playerCamera;
-    [Tooltip("비우면 런타임에 자동 생성 (오른쪽 절반).")]
-    public Camera aiCamera;
-
-    [Header("카메라 포즈")]
-    public Vector3 cameraLocalPosition = Vector3.zero;
-    public Vector3 cameraLocalEuler = new Vector3(90f, 0f, 0f);
-    public float topDownMinHeightAboveBoard = 38f;
-    public float topDownExtentScale = 1.15f;
 
     [Header("AI 입력")]
     public int jokerModelValue = 21;
@@ -53,10 +41,8 @@ public class StreamsGameFlowController : MonoBehaviour
     const string ResultCanvasName = "ResultCanvas";
     const string WinnerTextObjectName = "WinnerText";
     const string BoardCanvasName = "BoardCanvas";
-    const string LegacyBoardsRootName = "GameBoards";
 
-    public Camera PlayerCamera => playerCamera;
-    public Camera AiCamera => aiCamera;
+    public Camera PlayerCamera => mainCamera != null ? mainCamera : Camera.main;
 
     struct AiJob
     {
@@ -73,9 +59,6 @@ public class StreamsGameFlowController : MonoBehaviour
 
     void Awake()
     {
-        foreach (var r in FindObjectsByType<randomoutnum>(FindObjectsInactive.Include, FindObjectsSortMode.None))
-            r.enabled = false;
-
         ResolveBoards();
         ResolveAiModel();
 
@@ -99,9 +82,6 @@ public class StreamsGameFlowController : MonoBehaviour
     {
         StreamsGameResults.Clear();
         BindHudButtons();
-        EnsureBoardDimmer();
-        SetupHalfScreenCameras();
-        StartCoroutine(ApplyBoardDimmingAfterInitRoutine());
 
         if (StreamsTutorialSelection.IsActive)
         {
@@ -186,125 +166,6 @@ public class StreamsGameFlowController : MonoBehaviour
 
     void OnPlayerCardPlaced() => _waitingForPlayer = false;
 
-    void EnsureBoardDimmer()
-    {
-        var dimmer = FindFirstObjectByType<StreamsBoardBackgroundDimmer>();
-        if (dimmer == null)
-        {
-            var gameBoards = GameObject.Find("GameBoards");
-            if (gameBoards == null)
-                return;
-            dimmer = gameBoards.AddComponent<StreamsBoardBackgroundDimmer>();
-        }
-
-        dimmer.brightBoardName = "GameBoard_Player";
-    }
-
-    IEnumerator ApplyBoardDimmingAfterInitRoutine()
-    {
-        yield return null;
-        yield return new WaitForEndOfFrame();
-        FindFirstObjectByType<StreamsBoardBackgroundDimmer>()?.Apply();
-    }
-
-    void SetupHalfScreenCameras()
-    {
-        CleanupLegacySplitCameras();
-
-        if (playerCamera == null)
-            playerCamera = mainCamera != null ? mainCamera : Camera.main;
-
-        if (playerCamera == null)
-        {
-            Debug.LogError("StreamsGameFlowController: 카메라가 없습니다.");
-            return;
-        }
-
-        if (aiCamera == null)
-            aiCamera = CreateSplitCamera(playerCamera, "StreamsAiCamera");
-
-        StreamsHalfScreenLayout.ApplyCameraViewport(playerCamera, StreamsHalfScreenLayout.PlayerViewport);
-        StreamsHalfScreenLayout.ApplyCameraViewport(aiCamera, StreamsHalfScreenLayout.AiViewport);
-
-        if (playerBoard != null)
-            PositionCamera(playerCamera, playerBoard);
-        if (AiBoard != null)
-            PositionCamera(aiCamera, AiBoard);
-
-        StreamsHalfScreenLayout.BindWorldCanvas(FindBoardCanvas(playerBoard), playerCamera);
-        StreamsHalfScreenLayout.BindWorldCanvas(FindBoardCanvas(AiBoard), aiCamera);
-
-        DisableAllCamerasExcept(playerCamera, aiCamera);
-    }
-
-    static void CleanupLegacySplitCameras()
-    {
-        foreach (var cam in FindObjectsByType<Camera>(FindObjectsInactive.Include, FindObjectsSortMode.None))
-        {
-            if (cam == null)
-                continue;
-
-            string name = cam.gameObject.name;
-            if (name.StartsWith("BoardCamera_") || name.StartsWith("DuelAiCamera"))
-            {
-                if (Application.isPlaying)
-                    Destroy(cam.gameObject);
-            }
-        }
-    }
-
-    static void DisableAllCamerasExcept(Camera playerCam, Camera aiCam)
-    {
-        foreach (var cam in FindObjectsByType<Camera>(FindObjectsInactive.Include, FindObjectsSortMode.None))
-        {
-            if (cam == null)
-                continue;
-
-            bool keep = cam == playerCam || cam == aiCam;
-            cam.enabled = keep;
-            if (keep)
-                cam.targetTexture = null;
-        }
-    }
-
-    static Camera CreateSplitCamera(Camera template, string objectName)
-    {
-        var go = new GameObject(objectName);
-        var cam = go.AddComponent<Camera>();
-        cam.clearFlags = template.clearFlags;
-        cam.backgroundColor = template.backgroundColor;
-        cam.cullingMask = template.cullingMask;
-        cam.fieldOfView = template.fieldOfView;
-        cam.nearClipPlane = template.nearClipPlane;
-        cam.farClipPlane = template.farClipPlane;
-        cam.depth = template.depth + 1;
-        return cam;
-    }
-
-    void PositionCamera(Camera cam, num_path board)
-    {
-        StreamsBoardCameraPose.GetCameraPose(
-            board.transform,
-            board.slots,
-            cameraLocalPosition,
-            cameraLocalEuler,
-            topDownMinHeightAboveBoard,
-            topDownExtentScale,
-            out Vector3 pos,
-            out Quaternion rot);
-        cam.transform.SetPositionAndRotation(pos, rot);
-        StreamsHalfScreenLayout.FitCameraToBoardCanvas(cam, board.transform);
-    }
-
-    static Canvas FindBoardCanvas(num_path board)
-    {
-        if (board == null)
-            return null;
-
-        Transform anchor = StreamsBoardCameraPose.TryFindGameBoardAnchor(board.transform);
-        return anchor != null ? anchor.GetComponentInChildren<Canvas>(true) : null;
-    }
-
     IEnumerator GameLoopRoutine()
     {
         var deck = BuildDeck();
@@ -370,10 +231,6 @@ public class StreamsGameFlowController : MonoBehaviour
         if (button == null)
             return;
 
-        var sceneLoader = button.GetComponent<SceneButtonLoader>();
-        if (sceneLoader != null)
-            sceneLoader.enabled = false;
-
         button.onClick.RemoveListener(onClick);
         button.onClick.AddListener(onClick);
         if (hide)
@@ -388,9 +245,6 @@ public class StreamsGameFlowController : MonoBehaviour
         foreach (var button in FindObjectsByType<Button>(FindObjectsInactive.Include, FindObjectsSortMode.None))
         {
             if (button == null || button.name != objectName)
-                continue;
-
-            if (IsUnderNamedParent(button.transform, LegacyBoardsRootName))
                 continue;
 
             if (IsUnderNamedParent(button.transform, BoardCanvasName))
@@ -578,31 +432,52 @@ public class StreamsGameFlowController : MonoBehaviour
 
                 int newTile = CardStringToModelInt(job.card);
                 int slot = -1;
-                float[] slotPercentages = null;
 
                 if (aiModel != null)
                 {
-                    var task = Task.Run(() =>
-                        aiModel.GetPositionDecision(state, newTile, remainingMcts, futureTileCount, jokerModelValue));
-
-                    while (!task.IsCompleted)
-                        yield return null;
-
-                    if (task.IsFaulted)
+                    if (Application.platform == RuntimePlatform.WebGLPlayer)
                     {
-                        Debug.LogWarning($"AI 계산 오류: {task.Exception?.GetBaseException().Message}");
-                        slot = -1;
+                        // WebGL은 Task.Run이 완료되지 않거나 메인 스레드를 멈춥니다.
+                        if (aiModel.useMcts)
+                        {
+                            var search = aiModel.CreateMctsSearch(
+                                state, newTile, remainingMcts, futureTileCount, jokerModelValue);
+                            while (!search.IsDone)
+                            {
+                                float sliceStart = Time.realtimeSinceStartup;
+                                while (!search.IsDone && Time.realtimeSinceStartup - sliceStart < 0.005f)
+                                    search.Advance(1);
+                                if (!search.IsDone)
+                                    yield return null;
+                            }
+
+                            slot = aiModel.DecisionFromSearch(state, search).BestPosition;
+                        }
+                        else
+                        {
+                            slot = aiModel.GetPositionDecision(
+                                state, newTile, remainingMcts, futureTileCount, jokerModelValue).BestPosition;
+                        }
                     }
                     else
                     {
-                        var decision = task.Result;
-                        slot = decision.BestPosition;
-                        slotPercentages = decision.SlotPercentages;
+                        var task = Task.Run(() =>
+                            aiModel.GetPositionDecision(state, newTile, remainingMcts, futureTileCount, jokerModelValue));
+
+                        while (!task.IsCompleted)
+                            yield return null;
+
+                        if (task.IsFaulted)
+                        {
+                            Debug.LogWarning($"AI 계산 오류: {task.Exception?.GetBaseException().Message}");
+                            slot = -1;
+                        }
+                        else
+                        {
+                            slot = task.Result.BestPosition;
+                        }
                     }
                 }
-
-                if (slotPercentages != null && board != null)
-                    board.ShowSlotProbabilities(slotPercentages);
 
                 if (slot < 0 || slot >= board.SlotCount || board.IsSlotFilled(slot))
                     slot = board.FirstEmptySlotIndex();

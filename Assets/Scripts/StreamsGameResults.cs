@@ -1,4 +1,4 @@
-/// <summary>SampleScene → EndScene 씬 전환 시 점수 전달용(단일 플레이 세션).</summary>
+/// <summary>SampleScene 결과 화면용 점수 보관(단일 플레이 세션).</summary>
 public static class StreamsGameResults
 {
     public static bool HasData { get; private set; }

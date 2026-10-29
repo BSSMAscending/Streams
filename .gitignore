@@ -12,6 +12,10 @@
 /[Uu]ser[Ss]ettings/
 *.log
 
+# Blender backup files. Unity can import .blend; the backups do not belong in version control.
+*.blend1
+*.blend1.meta
+
 # MemoryCaptures can get excessive in size.
 # They also could contain extremely sensitive data
 /[Mm]emoryCaptures/
@@ -37,6 +41,7 @@ ExportedObj/
 *.csproj
 *.unityproj
 *.sln
+*.slnx
 *.suo
 *.tmp
 *.user
@@ -57,6 +62,9 @@ ExportedObj/
 # Unity3D generated file on crash reports
 sysinfo.txt
 
+# Mono auto generated files
+mono_crash.*
+
 # Builds
 *.apk
 *.aab
@@ -67,25 +75,48 @@ sysinfo.txt
 # Crashlytics generated file
 crashlytics-build.properties
 
-# Packed Addressables
+# TestRunner generated files
+InitTestScene*.unity*
+/[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# Addressables default ignores, before user customizations
+/ServerData
+/[Aa]ssets/[Ss]treamingAssets/aa*
+/[Aa]ssets/[Aa]ddressable[Aa]ssets[Dd]ata/link.xml*
+/[Aa]ssets/[Aa]ddressables_Temp*
 /[Aa]ssets/[Aa]ddressable[Aa]ssets[Dd]ata/*/*.bin*
 
-# Temporary auto-generated Android Assets
-/[Aa]ssets/[Ss]treamingAssets/aa.meta
-/[Aa]ssets/[Ss]treamingAssets/aa/*
+# Visual Scripting auto-generated files
+/[Aa]ssets/Unity.VisualScripting.Generated/VisualScripting.Flow/UnitOptions.db
+/[Aa]ssets/Unity.VisualScripting.Generated/VisualScripting.Flow/UnitOptions.db.meta
+/[Aa]ssets/Unity.VisualScripting.Generated/VisualScripting.Core/Property Providers
+/[Aa]ssets/Unity.VisualScripting.Generated/VisualScripting.Core/Property Providers.meta
+
+# UI Toolkit auto generated files
+/UIElementsSchema/
+
+# Auto-generated cache in Assets folder
+/[Aa]ssets/[Ss]ceneDependencyCache*
 
 # macOS
 .DS_Store
 .DS_Store?
 ._*
 
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+
 # Cursor local settings (machine-specific MCP paths)
 .cursor/
 
-# Custom build output (StreamsBuild, StreamsBuildv0.3.1, ...)
+# Custom build output (StreamsBuild, StreamsBuildv0.3.1, WebGL, ...)
 BuildStreams*/
 StreamsBuild*/
 StreamsBuild*.zip
+WebGL/
 *.zip
 
 # .NET build output

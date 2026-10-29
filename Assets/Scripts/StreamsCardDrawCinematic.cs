@@ -87,6 +87,9 @@ public class StreamsCardDrawCinematic : MonoBehaviour
     bool _playing;
     bool _skipIntro;
     bool _skipIntroAllowed;
+    bool _fitting;
+    int _fitW = -1;
+    int _fitH = -1;
     static int _blockPlacementUntilFrame = -1;
     static bool _waitForPointerRelease;
 
@@ -185,6 +188,8 @@ public class StreamsCardDrawCinematic : MonoBehaviour
 
         gameObject.SetActive(true);
         transform.SetAsLastSibling();
+        FitToScreen();
+        Canvas.ForceUpdateCanvases();
 
         string display = string.IsNullOrEmpty(cardValue) ? "" : cardValue.Trim().ToUpperInvariant();
 
@@ -209,14 +214,11 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         if (_cardGroup != null)
             _cardGroup.alpha = 1f;
 
-        Vector2 center = Vector2.zero;
-        Vector2 pocketOff = PocketOffscreenPosition();
-        Vector2 pocketStop = new Vector2(0f, -OverlayHeight() * Mathf.Max(0.08f, pocketStopScreenY));
         Vector2 tucked = CardTuckedOffset();
         float revealedAngle = SpinEndAngle();
 
         SetActive(pocket, false);
-        pocket.anchoredPosition = pocketOff;
+        pocket.anchoredPosition = PocketOffscreenPosition();
         pocket.localScale = Vector3.one;
         SetActive(pocket, true);
 
@@ -224,23 +226,24 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         _card.localScale = _cardBaseScale;
         _card.localEulerAngles = Vector3.zero;
         ApplyFlipAngle(180f);
-        _card.anchoredPosition = pocketOff + tucked;
+        _card.anchoredPosition = PocketOffscreenPosition() + tucked;
         SetCardVisible(true);
 
         yield return FadeDim(dimAlpha, dimInDuration);
-        yield return MovePocketWithCardBehind(pocketOff, pocketStop, tucked, pocketRiseDuration);
+        yield return MovePocketWithCardBehind(tucked, pocketRiseDuration);
 
         PlaceCardBehindPocket();
-        yield return TravelAndSpin(_card.anchoredPosition, center, travelDuration);
+        yield return TravelAndSpin(tucked, travelDuration);
 
         if (_skipIntro)
-            SnapToRevealed(center, pocketStop, revealedAngle);
+            SnapToRevealed(revealedAngle);
 
         _skipIntroAllowed = false;
         _skipIntro = false;
         SetSkipHintVisible(false);
 
-        pocketDown = StartCoroutine(MoveAnchored(pocket, pocketStop, pocketOff, pocketDownDuration));
+        pocketDown = StartCoroutine(MoveAnchoredDynamic(
+            pocket, PocketStopPosition, PocketOffscreenPosition, pocketDownDuration));
         ReleaseToBoard(display);
         StartCoroutine(PlayOutro(pocketDown));
     }
@@ -289,6 +292,14 @@ public class StreamsCardDrawCinematic : MonoBehaviour
 
     void Update()
     {
+        if (Screen.width != _fitW || Screen.height != _fitH)
+        {
+            _fitW = Screen.width;
+            _fitH = Screen.height;
+            FitToScreen();
+            Canvas.ForceUpdateCanvases();
+        }
+
         if (!_playing || !_skipIntroAllowed || _skipIntro)
             return;
 
@@ -304,12 +315,18 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         return 360f * (Mathf.Max(1, spinTurns) + 1);
     }
 
-    void SnapToRevealed(Vector2 cardCenter, Vector2 pocketStop, float revealedAngle)
+    void OnRectTransformDimensionsChange()
     {
+        FitToScreen();
+    }
+
+    void SnapToRevealed(float revealedAngle)
+    {
+        FitToScreen();
         SetDimAlpha(dimAlpha);
         SetActive(pocket, true);
-        pocket.anchoredPosition = pocketStop;
-        _card.anchoredPosition = cardCenter;
+        pocket.anchoredPosition = PocketStopPosition();
+        _card.anchoredPosition = Vector2.zero;
         _card.localScale = _cardBaseScale;
         ApplyFlipAngle(revealedAngle);
         PlaceCardBehindPocket();
@@ -359,7 +376,7 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         _card.anchorMin = _card.anchorMax = new Vector2(0.5f, 0.5f);
         _card.pivot = new Vector2(0.5f, 0.5f);
         _card.anchoredPosition = Vector2.zero;
-        _cardBaseScale = _card.localScale;
+        _cardBaseScale = _card.localScale.sqrMagnitude > 0.0001f ? _card.localScale : Vector3.one;
 
         _cardGroup = _cardInstance.GetComponent<CanvasGroup>();
         if (_cardGroup == null)
@@ -396,6 +413,24 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         if (target == null)
             return;
 
+        var rt = target.transform as RectTransform;
+        bool stretch = rt != null && rt.anchorMin == Vector2.zero && rt.anchorMax == Vector2.one;
+        Vector2 anchorMin = Vector2.zero;
+        Vector2 anchorMax = Vector2.one;
+        Vector2 pivot = new Vector2(0.5f, 0.5f);
+        Vector2 anchored = Vector2.zero;
+        Vector2 size = Vector2.zero;
+        Vector3 scale = Vector3.one;
+        if (rt != null)
+        {
+            anchorMin = rt.anchorMin;
+            anchorMax = rt.anchorMax;
+            pivot = rt.pivot;
+            anchored = rt.anchoredPosition;
+            size = rt.sizeDelta;
+            scale = rt.localScale;
+        }
+
         var canvas = target.GetComponent<Canvas>();
         if (canvas == null)
             canvas = target.AddComponent<Canvas>();
@@ -405,6 +440,21 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         var raycaster = target.GetComponent<GraphicRaycaster>();
         if (raycaster != null)
             raycaster.enabled = false;
+
+        if (rt == null)
+            return;
+
+        rt.anchorMin = anchorMin;
+        rt.anchorMax = anchorMax;
+        rt.pivot = pivot;
+        rt.localScale = scale;
+        if (stretch)
+            StretchFull(rt);
+        else
+        {
+            rt.anchoredPosition = anchored;
+            rt.sizeDelta = size;
+        }
     }
 
     void DestroyCardInstance()
@@ -433,10 +483,67 @@ public class StreamsCardDrawCinematic : MonoBehaviour
 
     float OverlayHeight()
     {
+        var root = transform as RectTransform;
+        if (root != null && root.rect.height > 1f)
+            return root.rect.height;
+
         var canvas = GetComponentInParent<Canvas>();
         if (canvas != null && canvas.pixelRect.height > 1f)
             return canvas.pixelRect.height / Mathf.Max(canvas.scaleFactor, 0.0001f);
         return Screen.height;
+    }
+
+    Vector2 PocketStopPosition()
+    {
+        return new Vector2(0f, -OverlayHeight() * Mathf.Max(0.08f, pocketStopScreenY));
+    }
+
+    void FitToScreen()
+    {
+        if (_fitting)
+            return;
+
+        _fitting = true;
+        var root = transform as RectTransform;
+        StretchFull(root);
+        if (dimmer != null)
+            StretchFull(dimmer.rectTransform);
+        if (_sparkleRoot != null)
+            StretchFull(_sparkleRoot);
+        ApplySkipHintLayout();
+        ResyncNestedCanvas(dimmer != null ? dimmer.gameObject : null);
+        ResyncNestedCanvas(skipHint != null ? skipHint.gameObject : null);
+        ResyncNestedCanvas(_cardInstance);
+        ResyncNestedCanvas(pocket != null ? pocket.gameObject : null);
+        ResyncNestedCanvas(_sparkleRoot != null ? _sparkleRoot.gameObject : null);
+        _fitting = false;
+    }
+
+    static void ResyncNestedCanvas(GameObject go)
+    {
+        if (go == null)
+            return;
+
+        var canvas = go.GetComponent<Canvas>();
+        if (canvas == null || !canvas.enabled)
+            return;
+
+        canvas.enabled = false;
+        canvas.enabled = true;
+    }
+
+    void ApplySkipHintLayout()
+    {
+        if (skipHint == null)
+            return;
+
+        var rt = skipHint.rectTransform;
+        rt.anchorMin = rt.anchorMax = new Vector2(0f, 0f);
+        rt.pivot = new Vector2(0f, 0f);
+        rt.sizeDelta = new Vector2(1120f, 112f);
+        rt.anchoredPosition = new Vector2(40f, 32f);
+        rt.localScale = Vector3.one;
+        skipHint.fontSize = 64f;
     }
 
     float PocketHalfHeight()
@@ -456,12 +563,13 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         return new Vector2(0f, y);
     }
 
-    IEnumerator MovePocketWithCardBehind(Vector2 pocketFrom, Vector2 pocketTo, Vector2 cardOffset, float duration)
+    IEnumerator MovePocketWithCardBehind(Vector2 cardOffset, float duration)
     {
         if (duration <= 0.001f)
         {
-            pocket.anchoredPosition = pocketTo;
-            _card.anchoredPosition = pocketTo + cardOffset;
+            Vector2 stop = PocketStopPosition();
+            pocket.anchoredPosition = stop;
+            _card.anchoredPosition = stop + cardOffset;
             yield break;
         }
 
@@ -472,24 +580,28 @@ public class StreamsCardDrawCinematic : MonoBehaviour
                 yield break;
             t += Time.deltaTime;
             float u = EaseOut(Mathf.Clamp01(t / duration));
-            Vector2 p = Vector2.LerpUnclamped(pocketFrom, pocketTo, u);
+            Vector2 p = Vector2.LerpUnclamped(PocketOffscreenPosition(), PocketStopPosition(), u);
             pocket.anchoredPosition = p;
             _card.anchoredPosition = p + cardOffset;
             yield return null;
         }
 
-        pocket.anchoredPosition = pocketTo;
-        _card.anchoredPosition = pocketTo + cardOffset;
+        Vector2 end = PocketStopPosition();
+        pocket.anchoredPosition = end;
+        _card.anchoredPosition = end + cardOffset;
     }
 
-    IEnumerator TravelAndSpin(Vector2 from, Vector2 to, float duration)
+    IEnumerator TravelAndSpin(Vector2 cardOffset, float duration)
     {
         float startAngle = 180f;
         float endAngle = SpinEndAngle();
+        Vector2 to = Vector2.zero;
 
         if (duration <= 0.001f)
         {
             _card.anchoredPosition = to;
+            if (pocket != null)
+                pocket.anchoredPosition = PocketStopPosition();
             ApplyFlipAngle(endAngle);
             yield break;
         }
@@ -503,12 +615,16 @@ public class StreamsCardDrawCinematic : MonoBehaviour
             float u = Mathf.Clamp01(t / duration);
             float moveU = EaseOut(u);
             float spinU = EaseOutSpin(u);
-            _card.anchoredPosition = Vector2.LerpUnclamped(from, to, moveU);
+            if (pocket != null)
+                pocket.anchoredPosition = PocketStopPosition();
+            _card.anchoredPosition = Vector2.LerpUnclamped(PocketStopPosition() + cardOffset, to, moveU);
             ApplyFlipAngle(Mathf.LerpUnclamped(startAngle, endAngle, spinU));
             yield return null;
         }
 
         _card.anchoredPosition = to;
+        if (pocket != null)
+            pocket.anchoredPosition = PocketStopPosition();
         ApplyFlipAngle(endAngle);
     }
 
@@ -682,6 +798,33 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         }
 
         target.anchoredPosition = to;
+    }
+
+    IEnumerator MoveAnchoredDynamic(
+        RectTransform target,
+        System.Func<Vector2> from,
+        System.Func<Vector2> to,
+        float duration)
+    {
+        if (target == null || from == null || to == null)
+            yield break;
+
+        if (duration <= 0.001f)
+        {
+            target.anchoredPosition = to();
+            yield break;
+        }
+
+        float t = 0f;
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            float u = EaseOut(Mathf.Clamp01(t / duration));
+            target.anchoredPosition = Vector2.LerpUnclamped(from(), to(), u);
+            yield return null;
+        }
+
+        target.anchoredPosition = to();
     }
 
     IEnumerator FadeDim(float to, float duration)

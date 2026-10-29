@@ -30,7 +30,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
     const float ClickIconBobSpeed = 6.4f;
     const float ClickIconLift = 48f;
     const float ClickIconBelowTextGap = 28f;
-    const string ClickIconSpritePath = "Assets/Sprites/ClickIcon.png";
+    const string ClickIconSpritePath = "Assets/Resources/ClickIcon.png";
 
     static StreamsTutorialSpotlight _instance;
 
@@ -58,6 +58,11 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
     float _barRestPlayer;
     float _barRestAi;
     RectTransform _centerOn;
+    Vector2 _laidOutSize;
+    int _screenW = -1;
+    int _screenH = -1;
+    float _uiFit = 1f;
+    bool _rebuilding;
 
     public static StreamsTutorialSpotlight Ensure()
     {
@@ -94,12 +99,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             _canvas = gameObject.AddComponent<Canvas>();
         _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
         _canvas.sortingOrder = SortingOrder;
-        if (gameObject.GetComponent<CanvasScaler>() == null)
-        {
-            var scaler = gameObject.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
-            scaler.scaleFactor = 1f;
-        }
+        ApplyGameScaler();
 
         if (gameObject.GetComponent<GraphicRaycaster>() == null)
             gameObject.AddComponent<GraphicRaycaster>();
@@ -166,8 +166,82 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         if (_clickIcon == null || !_clickIcon.gameObject.activeSelf)
             return;
 
-        float bob = Mathf.Sin(Time.unscaledTime * ClickIconBobSpeed) * ClickIconBobPx;
+        float bob = Mathf.Sin(Time.unscaledTime * ClickIconBobSpeed) * ClickIconBobPx * _uiFit;
         _clickIcon.anchoredPosition = _clickIconBase + new Vector2(0f, bob);
+    }
+
+    void LateUpdate()
+    {
+        if (_canvas == null || !_canvas.enabled || _root == null)
+            return;
+
+        bool screenChanged = Screen.width != _screenW || Screen.height != _screenH;
+        bool fitChanged = Mathf.Abs(UiFit(_root != null ? _root.rect : new Rect()) - _uiFit) > 0.01f;
+        if (screenChanged)
+        {
+            ApplyGameScaler();
+            RefreshScaler(gameObject);
+            Canvas.ForceUpdateCanvases();
+        }
+
+        Vector2 size = _root.rect.size;
+        bool rectChanged = (_laidOutSize - size).sqrMagnitude > 0.25f;
+        if (!screenChanged && !rectChanged && !fitChanged)
+            return;
+        if (size.x < 2f || size.y < 2f)
+            return;
+
+        RebuildDim();
+    }
+
+    void ApplyGameScaler()
+    {
+        var scaler = gameObject.GetComponent<CanvasScaler>();
+        if (scaler == null)
+            scaler = gameObject.AddComponent<CanvasScaler>();
+
+        CanvasScaler source = FindGameScaler();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = source != null ? source.referenceResolution : new Vector2(1920f, 1080f);
+        scaler.screenMatchMode = source != null
+            ? source.screenMatchMode
+            : CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+        scaler.matchWidthOrHeight = source != null ? source.matchWidthOrHeight : 0f;
+        scaler.referencePixelsPerUnit = source != null ? source.referencePixelsPerUnit : 100f;
+    }
+
+    static CanvasScaler FindGameScaler()
+    {
+        CanvasScaler fallback = null;
+        foreach (var canvas in FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (canvas == null)
+                continue;
+
+            var scaler = canvas.GetComponent<CanvasScaler>();
+            if (scaler == null || scaler.uiScaleMode != CanvasScaler.ScaleMode.ScaleWithScreenSize)
+                continue;
+
+            if (canvas.name == "BoardCanvas")
+                return scaler;
+            if (fallback == null)
+                fallback = scaler;
+        }
+
+        return fallback;
+    }
+
+    static void RefreshScaler(GameObject go)
+    {
+        if (go == null)
+            return;
+
+        var scaler = go.GetComponent<CanvasScaler>();
+        if (scaler == null || !scaler.enabled)
+            return;
+
+        scaler.enabled = false;
+        scaler.enabled = true;
     }
 
     public void RaiseAbove(Canvas other)
@@ -201,6 +275,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         if (_canvas == null)
             Build();
 
+        ApplyGameScaler();
         _worldCamera = worldCamera;
         _coachAnchor = coachAnchor;
         _mergeHoles = mergeHoles;
@@ -309,13 +384,23 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
 
     void RebuildDim()
     {
-        ClearChildren(_dimRoot);
-        if (_dimRoot == null)
+        if (_rebuilding || _dimRoot == null)
             return;
 
+        _rebuilding = true;
         Canvas.ForceUpdateCanvases();
 
-        Rect canvasLocal = _dimRoot.rect;
+        Rect full = _dimRoot.rect;
+        if (full.width < 2f || full.height < 2f)
+        {
+            _rebuilding = false;
+            return;
+        }
+
+        _uiFit = UiFit(full);
+        Rect canvasLocal = StreamsAspectFit.Fit(full);
+
+        ClearChildren(_dimRoot);
         var dark = new List<Rect> { canvasLocal };
         var highlightHoles = new List<Rect>();
         SubtractTargets(_holes, canvasLocal, dark, highlightHoles);
@@ -325,6 +410,17 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
 
         LayoutCoach(canvasLocal, highlightHoles);
         LayoutClickIcon(canvasLocal, highlightHoles);
+        _laidOutSize = canvasLocal.size;
+        _screenW = Screen.width;
+        _screenH = Screen.height;
+        _rebuilding = false;
+    }
+
+    static float UiFit(Rect area)
+    {
+        if (area.width < 2f || area.height < 2f)
+            return 1f;
+        return Mathf.Clamp(Mathf.Min(area.width / StreamsAspectFit.DesignWidth, area.height / StreamsAspectFit.DesignHeight), 0.35f, 1f);
     }
 
     void SubtractTargets(List<RectTransform> targets, Rect canvasLocal, List<Rect> dark, List<Rect> collected)
@@ -481,16 +577,23 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         Rect highlight = Union(holes, canvasLocal);
         Rect placement = PlacementRect(canvasLocal, highlight);
 
-        float wrapWidth = Mathf.Min(CoachMaxLineWidth, Mathf.Max(CoachMinSide, canvasLocal.width * 0.42f));
+        float fit = Mathf.Max(0.35f, _uiFit);
+        float font = CoachFontSize * fit;
+        float gap = CoachGap * fit;
+        float maxLine = CoachMaxLineWidth * fit;
+        float minSide = CoachMinSide * fit;
+        _coach.fontSize = font;
+
+        float wrapWidth = Mathf.Min(maxLine, Mathf.Max(minSide, canvasLocal.width * 0.42f));
         string wrapped = WrapToWidth(_coach, _coachSource, wrapWidth);
         _coach.text = wrapped;
         _coach.enableWordWrapping = true;
 
         Vector2 pref = _coach.GetPreferredValues(wrapped, wrapWidth, 0f);
-        float boxW = Mathf.Clamp(pref.x + 28f, 56f, wrapWidth + 28f);
-        float boxH = Mathf.Max(pref.y + 20f, CoachFontSize * 1.2f);
-        boxW = Mathf.Min(boxW, Mathf.Max(56f, canvasLocal.width - CoachGap * 2f));
-        boxH = Mathf.Min(boxH, Mathf.Max(CoachFontSize, canvasLocal.height - CoachGap * 2f));
+        float boxW = Mathf.Clamp(pref.x + 28f * fit, 56f * fit, wrapWidth + 28f * fit);
+        float boxH = Mathf.Max(pref.y + 20f * fit, font * 1.2f);
+        boxW = Mathf.Min(boxW, Mathf.Max(56f * fit, canvasLocal.width - gap * 2f));
+        boxH = Mathf.Min(boxH, Mathf.Max(font, canvasLocal.height - gap * 2f));
 
         bool onRight;
         Vector2 pivotPos = ChooseCoachPivot(
@@ -500,6 +603,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             placement.center,
             boxW,
             boxH,
+            gap,
             _coachAnchor == null,
             out onRight);
         _coach.alignment = onRight ? TextAlignmentOptions.TopLeft : TextAlignmentOptions.TopRight;
@@ -562,14 +666,15 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             return;
         }
 
-        float size = ClickIconSize;
+        float fit = Mathf.Max(0.35f, _uiFit);
+        float size = ClickIconSize * fit;
         if (_clickIconImage != null && _clickIconImage.sprite != null)
         {
             Rect sr = _clickIconImage.sprite.rect;
             if (sr.height > 1f)
             {
                 float aspect = sr.width / sr.height;
-                size = ClickIconSize;
+                size = ClickIconSize * fit;
                 _clickIcon.sizeDelta = new Vector2(size * aspect, size);
             }
         }
@@ -590,16 +695,16 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             return;
         }
 
-        float lift = _clickOnHighlight ? ClickIconLift : ClickIconLift - ClickIconBelowTextGap;
+        float lift = (_clickOnHighlight ? ClickIconLift : ClickIconLift - ClickIconBelowTextGap) * fit;
         float x = target.center.x;
         float y = target.yMin + lift;
 
-        float minY = canvasLocal.yMin + CoachGap + size + ClickIconBobPx;
+        float minY = canvasLocal.yMin + CoachGap * fit + size + ClickIconBobPx * fit;
         if (y < minY)
             y = minY;
 
         _clickIconBase = new Vector2(x, y);
-        float bob = Mathf.Sin(Time.unscaledTime * ClickIconBobSpeed) * ClickIconBobPx;
+        float bob = Mathf.Sin(Time.unscaledTime * ClickIconBobSpeed) * ClickIconBobPx * fit;
         _clickIcon.anchoredPosition = _clickIconBase + new Vector2(0f, bob);
         _clickIcon.gameObject.SetActive(true);
         _clickIcon.SetAsLastSibling();
@@ -628,18 +733,19 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         Vector2 focus,
         float boxW,
         float boxH,
+        float gap,
         bool considerEachHole,
         out bool onRight)
     {
         bool chosenRight = true;
-        Vector2 bestPos = new Vector2(highlight.xMax + CoachGap, highlight.yMax);
+        Vector2 bestPos = new Vector2(highlight.xMax + gap, highlight.yMax);
         float bestScore = float.NegativeInfinity;
 
         void Consider(float pivotX, float pivotY, bool right)
         {
             Rect box = CoachBox(new Vector2(pivotX, pivotY), boxW, boxH, right);
-            box = ClampRectToCanvas(box, canvas, CoachGap);
-            float score = RateCoachBox(box, canvas, holes, focus, highlight);
+            box = ClampRectToCanvas(box, canvas, gap);
+            float score = RateCoachBox(box, canvas, holes, focus, highlight, gap);
             if (score <= bestScore)
                 return;
 
@@ -649,12 +755,12 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         }
 
         float midY = highlight.center.y + boxH * 0.5f;
-        Consider(highlight.xMax + CoachGap, midY, true);
-        Consider(highlight.xMin - CoachGap, midY, false);
-        Consider(highlight.xMax + CoachGap, highlight.yMax, true);
-        Consider(highlight.xMin - CoachGap, highlight.yMax, false);
-        Consider(highlight.xMax + CoachGap, highlight.yMin, true);
-        Consider(highlight.xMin - CoachGap, highlight.yMin, false);
+        Consider(highlight.xMax + gap, midY, true);
+        Consider(highlight.xMin - gap, midY, false);
+        Consider(highlight.xMax + gap, highlight.yMax, true);
+        Consider(highlight.xMin - gap, highlight.yMax, false);
+        Consider(highlight.xMax + gap, highlight.yMin, true);
+        Consider(highlight.xMin - gap, highlight.yMin, false);
 
         if (considerEachHole && holes != null)
         {
@@ -662,10 +768,10 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             {
                 Rect hole = holes[i];
                 float holeMidY = hole.center.y + boxH * 0.5f;
-                Consider(hole.xMax + CoachGap, holeMidY, true);
-                Consider(hole.xMin - CoachGap, holeMidY, false);
-                Consider(hole.xMax + CoachGap, hole.yMax, true);
-                Consider(hole.xMin - CoachGap, hole.yMax, false);
+                Consider(hole.xMax + gap, holeMidY, true);
+                Consider(hole.xMin - gap, holeMidY, false);
+                Consider(hole.xMax + gap, hole.yMax, true);
+                Consider(hole.xMin - gap, hole.yMax, false);
             }
         }
 
@@ -723,9 +829,10 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         return hole;
     }
 
-    static float RateCoachBox(Rect box, Rect canvas, List<Rect> holes, Vector2 focus, Rect highlight)
+    static float RateCoachBox(Rect box, Rect canvas, List<Rect> holes, Vector2 focus, Rect highlight, float gap)
     {
-        Rect vis = Intersect(box, InsetRect(canvas, CoachGap));
+        float fit = CoachGap > 0.01f ? gap / CoachGap : 1f;
+        Rect vis = Intersect(box, InsetRect(canvas, gap));
         float area = Mathf.Max(1f, box.width * box.height);
         float visible = Mathf.Max(0f, vis.width * vis.height);
         if (visible < area * 0.45f)
@@ -744,10 +851,10 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         Rect placeHit = Intersect(box, highlight);
         overlap += Mathf.Max(0f, placeHit.width * placeHit.height);
 
-        bool rightOf = box.xMin >= highlight.xMax - 8f;
-        bool leftOf = box.xMax <= highlight.xMin + 8f;
-        bool midY = Mathf.Abs(box.center.y - highlight.center.y) <= Mathf.Max(24f, highlight.height * 0.25f);
-        bool below = box.yMax <= highlight.yMin + 24f;
+        bool rightOf = box.xMin >= highlight.xMax - 8f * fit;
+        bool leftOf = box.xMax <= highlight.xMin + 8f * fit;
+        bool midY = Mathf.Abs(box.center.y - highlight.center.y) <= Mathf.Max(24f * fit, highlight.height * 0.25f);
+        bool below = box.yMax <= highlight.yMin + 24f * fit;
         float sideBonus = 0f;
         if ((rightOf || leftOf) && midY)
             sideBonus = 240f;
@@ -913,6 +1020,10 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             max = Vector2.Max(max, local);
         }
 
+        float fit = Mathf.Max(0.35f, _uiFit);
+        padX *= fit;
+        padTop *= fit;
+        padBottom *= fit;
         return Rect.MinMaxRect(min.x, min.y, max.x, max.y);
     }
 

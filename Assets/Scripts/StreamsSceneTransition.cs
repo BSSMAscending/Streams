@@ -20,8 +20,14 @@ public class StreamsSceneTransition : MonoBehaviour
     static Sprite _circleSprite;
 
     RectTransform[] _circles = System.Array.Empty<RectTransform>();
+    RectTransform _barLeft;
+    RectTransform _barRight;
+    RectTransform _barTop;
+    RectTransform _barBottom;
     CanvasGroup _group;
     bool _busy;
+    int _builtW = -1;
+    int _builtH = -1;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Bootstrap()
@@ -90,6 +96,66 @@ public class StreamsSceneTransition : MonoBehaviour
         _group.alpha = 1f;
         _group.blocksRaycasts = false;
         _group.interactable = false;
+
+        _barLeft = CreateLetterboxBar("AspectBarLeft");
+        _barRight = CreateLetterboxBar("AspectBarRight");
+        _barTop = CreateLetterboxBar("AspectBarTop");
+        _barBottom = CreateLetterboxBar("AspectBarBottom");
+        ApplyLetterbox();
+    }
+
+    RectTransform CreateLetterboxBar(string name)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        var rect = go.GetComponent<RectTransform>();
+        rect.SetParent(transform, false);
+        rect.anchorMin = Vector2.zero;
+        rect.anchorMax = Vector2.zero;
+        rect.offsetMin = Vector2.zero;
+        rect.offsetMax = Vector2.zero;
+        rect.pivot = new Vector2(0.5f, 0.5f);
+
+        var image = go.GetComponent<Image>();
+        image.color = Color.black;
+        image.raycastTarget = false;
+        return rect;
+    }
+
+    void ApplyLetterbox()
+    {
+        if (_barLeft == null || Screen.width < 2 || Screen.height < 2)
+            return;
+
+        var screen = new Rect(0f, 0f, Screen.width, Screen.height);
+        Rect fitted = StreamsAspectFit.Fit(screen);
+        float x0 = fitted.xMin / screen.width;
+        float x1 = fitted.xMax / screen.width;
+        float y0 = fitted.yMin / screen.height;
+        float y1 = fitted.yMax / screen.height;
+
+        PlaceLetterbox(_barLeft, 0f, 0f, x0, 1f);
+        PlaceLetterbox(_barRight, x1, 0f, 1f, 1f);
+        PlaceLetterbox(_barBottom, x0, 0f, x1, y0);
+        PlaceLetterbox(_barTop, x0, y1, x1, 1f);
+    }
+
+    void PlaceLetterbox(RectTransform rect, float xMin, float yMin, float xMax, float yMax)
+    {
+        bool visible = xMax - xMin > 0.001f && yMax - yMin > 0.001f;
+        if (rect.gameObject.activeSelf != visible)
+            rect.gameObject.SetActive(visible);
+        if (!visible)
+            return;
+
+        var min = new Vector2(xMin, yMin);
+        var max = new Vector2(xMax, yMax);
+        if (rect.anchorMin == min && rect.anchorMax == max && rect.offsetMin == Vector2.zero && rect.offsetMax == Vector2.zero)
+            return;
+
+        rect.anchorMin = min;
+        rect.anchorMax = max;
+        rect.offsetMin = Vector2.zero;
+        rect.offsetMax = Vector2.zero;
     }
 
     IEnumerator Transition(string sceneName)
@@ -123,15 +189,56 @@ public class StreamsSceneTransition : MonoBehaviour
         _busy = false;
     }
 
+    void LateUpdate()
+    {
+        ApplyLetterbox();
+
+        if (!_busy || _circles == null || _circles.Length == 0)
+            return;
+        if (Screen.width == _builtW && Screen.height == _builtH)
+            return;
+
+        ReflowGrid();
+    }
+
+    void ReflowGrid()
+    {
+        var scales = new Vector3[_circles.Length];
+        for (int i = 0; i < scales.Length; i++)
+            scales[i] = _circles[i] != null ? _circles[i].localScale : new Vector3(CoverScale, CoverScale, 1f);
+
+        int oldCount = _circles.Length;
+        RebuildGrid();
+        int keep = Mathf.Min(oldCount, _circles.Length);
+        for (int i = 0; i < keep; i++)
+        {
+            if (_circles[i] != null)
+                _circles[i].localScale = scales[i];
+        }
+
+        var covered = new Vector3(CoverScale, CoverScale, 1f);
+        for (int i = keep; i < _circles.Length; i++)
+        {
+            if (_circles[i] != null)
+                _circles[i].localScale = covered;
+        }
+    }
+
     void RebuildGrid()
     {
-        while (transform.childCount > 0)
-            DestroyImmediate(transform.GetChild(0).gameObject);
+        for (int i = transform.childCount - 1; i >= 0; i--)
+        {
+            Transform child = transform.GetChild(i);
+            if (child.name.StartsWith("AspectBar"))
+                continue;
+            DestroyImmediate(child.gameObject);
+        }
 
-        float width = Screen.width;
-        float height = Screen.height;
-        float cell = width / Columns;
-        int rows = Mathf.Max(1, Mathf.CeilToInt(height / cell));
+        _builtW = Screen.width;
+        _builtH = Screen.height;
+        Rect box = StreamsAspectFit.Fit(new Rect(0f, 0f, _builtW, _builtH));
+        float cell = box.width / Columns;
+        int rows = Mathf.Max(1, Mathf.CeilToInt(box.height / cell));
         int count = Columns * rows;
         _circles = new RectTransform[count];
 
@@ -148,7 +255,9 @@ public class StreamsSceneTransition : MonoBehaviour
                 rect.anchorMax = new Vector2(0f, 1f);
                 rect.pivot = new Vector2(0.5f, 0.5f);
                 rect.sizeDelta = new Vector2(cell, cell);
-                rect.anchoredPosition = new Vector2((col + 0.5f) * cell, -(row + 0.5f) * cell);
+                rect.anchoredPosition = new Vector2(
+                    box.xMin + (col + 0.5f) * cell,
+                    -(box.yMin + (row + 0.5f) * cell));
                 rect.localScale = Vector3.zero;
 
                 var image = go.AddComponent<Image>();

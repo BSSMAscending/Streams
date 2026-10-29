@@ -69,7 +69,57 @@ public class StreamsAIController : MonoBehaviour
         }
 
         var model = Unity.InferenceEngine.ModelLoader.Load(modelAsset);
-        m_Worker = new Unity.InferenceEngine.Worker(model, Unity.InferenceEngine.BackendType.GPUCompute);
+        // WebGL에는 컴퓨트 셰이더가 없습니다. 픽셀 셰이더 백엔드를 씁니다.
+        var backend = Application.platform == RuntimePlatform.WebGLPlayer
+            ? Unity.InferenceEngine.BackendType.GPUPixel
+            : Unity.InferenceEngine.BackendType.GPUCompute;
+        m_Worker = new Unity.InferenceEngine.Worker(model, backend);
+    }
+
+    /// <summary>WebGL용. 시뮬을 프레임에 나눠 돌릴 검색을 만듭니다.</summary>
+    public StreamsMctsCore.MctsStepper CreateMctsSearch(
+        int[] board,
+        int newTile,
+        IList<int> remainingDeckMcts,
+        int futureTileCount,
+        int unityJokerValue)
+    {
+        CopyBoardToMcts(board, unityJokerValue);
+        int tileM = ToMctsTile(newTile, unityJokerValue);
+
+        int emptyCount = 0;
+        for (int i = 0; i < 20; i++)
+        {
+            if (m_MctsBoardScratch[i] == -1)
+                emptyCount++;
+        }
+
+        int? nsim = ResolveMctsNsim();
+        int resolved = nsim ?? StreamsMctsCore.GetAdaptiveNsim(emptyCount);
+        if (Application.platform == RuntimePlatform.WebGLPlayer)
+            resolved = ScaleWebGlNsim(resolved);
+
+        var pool = remainingDeckMcts ?? Array.Empty<int>();
+        return new StreamsMctsCore.MctsStepper(
+            m_MctsBoardScratch, tileM, pool, futureTileCount, m_MctsRng, resolved);
+    }
+
+    public StreamsAiPositionDecision DecisionFromSearch(int[] board, StreamsMctsCore.MctsStepper search)
+    {
+        return new StreamsAiPositionDecision(search.BestPosition, NormalizeWeightsToPercent(board, search.Weights));
+    }
+
+    /// <summary>
+    /// 이 롤아웃은 WebGL에서 네이티브보다 약 8배 느립니다.
+    /// PC와 비슷한 계산 시간을 쓰도록 시뮬 횟수를 8로 나눕니다.
+    /// </summary>
+    const int WebGlSlowdown = 8;
+
+    static int ScaleWebGlNsim(int requested)
+    {
+        if (requested <= 1)
+            return 1;
+        return Math.Max(1, (requested + WebGlSlowdown / 2) / WebGlSlowdown);
     }
 
     /// <param name="remainingDeckMcts">
