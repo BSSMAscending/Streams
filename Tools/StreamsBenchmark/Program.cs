@@ -1,9 +1,24 @@
 using System.Text;
 
-const int gamesPerTier = 100;
+int gamesPerTier = 100;
 const int baseSeed = 42_026_051;
 var projectRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-var outputPath = Path.Combine(projectRoot, "Tools", "benchmark_ai_scores.csv");
+var outputPath = Path.Combine(projectRoot, "Tools", "benchmark_ai_scores_newtable.csv");
+var tierFilter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+bool exactDealtSet = false;
+
+for (int i = 0; i < args.Length; i++)
+{
+    if (args[i] == "--games" && i + 1 < args.Length)
+        gamesPerTier = int.Parse(args[++i]);
+    else if (args[i] == "--out" && i + 1 < args.Length)
+        outputPath = Path.GetFullPath(args[++i]);
+    else if (args[i] == "--tier" && i + 1 < args.Length)
+        tierFilter.Add(args[++i]);
+    else if (args[i] == "--exact")
+        exactDealtSet = true;
+}
+
 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
 var tiers = new (string name, int nsim)[]
@@ -18,25 +33,34 @@ var summaries = new List<string>();
 
 foreach (var (tierName, nsim) in tiers)
 {
-    Console.WriteLine($"{tierName} (nsim={nsim})...");
-    var scores = new List<int>(gamesPerTier);
+    if (tierFilter.Count > 0 && !tierFilter.Contains(tierName))
+        continue;
+
+    Console.WriteLine($"{tierName} (nsim={nsim}, games={gamesPerTier})...");
+    var scores = new int[gamesPerTier];
+    int done = 0;
+    var started = DateTime.UtcNow;
+    Parallel.For(0, gamesPerTier, g =>
+    {
+        int seed = baseSeed + g;
+        scores[g] = BenchmarkGame.PlayOneGame(nsim, seed, exactDealtSet);
+        int finished = Interlocked.Increment(ref done);
+        if (finished % 10 == 0 || finished == gamesPerTier)
+            Console.WriteLine($"  {finished}/{gamesPerTier}  elapsed={(DateTime.UtcNow - started).TotalSeconds:F1}s");
+    });
+
+    var scoreList = scores.ToList();
+    double mean = Stats.Mean(scoreList);
+    double std = Stats.StdDev(scoreList, mean);
+    double geo = Stats.GeoMean(scoreList);
+    double median = Stats.Median(scoreList);
+    int min = Stats.Min(scoreList);
+    int max = Stats.Max(scoreList);
+    summaries.Add($"summary,{tierName},{nsim},,mean={mean:F2},geomean={geo:F2},median={median:F2},std={std:F2},min={min},max={max},n={gamesPerTier}");
+    Console.WriteLine($"  mean={mean:F2}, geomean={geo:F2}, median={median:F2}, std={std:F2}, min={min}, max={max}");
 
     for (int g = 0; g < gamesPerTier; g++)
-    {
-        if (g % 10 == 0)
-            Console.WriteLine($"  game {g + 1}/{gamesPerTier}");
-        int seed = baseSeed + g;
-        int score = BenchmarkGame.PlayOneGame(nsim, seed);
-        scores.Add(score);
-        rows.Add($"{tierName},{nsim},{g},{seed},{score}");
-    }
-
-    double mean = Stats.Mean(scores);
-    double std = Stats.StdDev(scores, mean);
-    int min = Stats.Min(scores);
-    int max = Stats.Max(scores);
-    summaries.Add($"summary,{tierName},{nsim},,mean={mean:F2},std={std:F2},min={min},max={max},n={gamesPerTier}");
-    Console.WriteLine($"  mean={mean:F2}, std={std:F2}, min={min}, max={max}");
+        rows.Add($"{tierName},{nsim},{g},{baseSeed + g},{scores[g]}");
 }
 
 rows.AddRange(summaries);
@@ -47,9 +71,9 @@ static class BenchmarkGame
 {
     const int DrawLimit = 20;
 
-    public static int PlayOneGame(int nsim, int seed)
+    public static int PlayOneGame(int nsim, int seed, bool exactDealtSet = false)
     {
-        var drawSequence = BuildDrawSequence(seed);
+        var drawSequence = BuildDrawSequence(seed, exactDealtSet);
         var mctsRng = new Random(seed ^ unchecked((int)0x5EED_BEEF));
         var board = new int[20];
         var slotStrings = new string[20];
@@ -98,17 +122,24 @@ static class BenchmarkGame
         return 0;
     }
 
-    static List<RoundDraw> BuildDrawSequence(int seed)
+    static List<RoundDraw> BuildDrawSequence(int seed, bool exactDealtSet)
     {
         var gameRng = new Random(seed);
         var deck = BuildDeck();
-        var rounds = new List<RoundDraw>(DrawLimit);
+        for (int i = deck.Count - 1; i > 0; i--)
+        {
+            int j = gameRng.Next(i + 1);
+            (deck[i], deck[j]) = (deck[j], deck[i]);
+        }
 
+        if (exactDealtSet)
+            deck.RemoveRange(DrawLimit, deck.Count - DrawLimit);
+
+        var rounds = new List<RoundDraw>(DrawLimit);
         for (int round = 0; round < DrawLimit && deck.Count > 0; round++)
         {
-            int pick = gameRng.Next(0, deck.Count);
-            string cardStr = deck[pick];
-            deck.RemoveAt(pick);
+            string cardStr = deck[0];
+            deck.RemoveAt(0);
             rounds.Add(new RoundDraw(cardStr, new List<string>(deck)));
         }
 
@@ -136,10 +167,11 @@ static class BenchmarkGame
 
 static class StreamsScoreUi
 {
+    // index = run 길이. 1칸은 0점, 20칸은 300점.
     static readonly int[] ScoreTable =
     {
-        0, 1, 3, 5, 7, 9, 11, 15, 20, 25,
-        30, 35, 40, 50, 60, 70, 85, 100, 150, 300
+        0, 0, 1, 3, 5, 7, 9, 11, 15, 20,
+        25, 30, 35, 40, 50, 60, 70, 85, 100, 150, 300
     };
 
     public static int Calculate(string[] cards)
@@ -231,6 +263,27 @@ static class Stats
             acc += d * d;
         }
         return Math.Sqrt(acc / (values.Count - 1));
+    }
+
+    public static double GeoMean(List<int> values)
+    {
+        double sum = 0;
+        foreach (int v in values)
+        {
+            if (v <= 0)
+                return 0;
+            sum += Math.Log(v);
+        }
+        return Math.Exp(sum / values.Count);
+    }
+
+    public static double Median(List<int> values)
+    {
+        var sorted = values.OrderBy(v => v).ToArray();
+        int n = sorted.Length;
+        if (n % 2 == 1)
+            return sorted[n / 2];
+        return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
     }
 
     public static int Min(List<int> values) => values.Min();

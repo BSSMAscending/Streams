@@ -9,7 +9,7 @@ public class StreamsTutorialController : MonoBehaviour
     static readonly string[] RemainingCards =
     {
         "4", "6", "7", "11",
-        "12", "12", "13", "13", "15", "17", "18", "19", "22", "23", "26", "29", "30"
+        "12", "12", "13", "13", "15", "17", "19", "22", "23", "26", "29", "30"
     };
 
     StreamsGameFlowController _flow;
@@ -29,7 +29,7 @@ public class StreamsTutorialController : MonoBehaviour
             _flow.playerBoard.OnPlayerCardPlaced -= _onPlaced;
 
         _flow?.playerBoard?.ClearAllowedPlacementSlot();
-        _spotlight?.Hide();
+        HideBoardSpotlight();
     }
 
     IEnumerator Run()
@@ -49,20 +49,22 @@ public class StreamsTutorialController : MonoBehaviour
         yield return new WaitForEndOfFrame();
 
         yield return DrawAndPlace(board, "1", 0, "기차 칸을 눌러 카드를 배치해 보세요.");
-        yield return ShowMessageOn(
-            ScoreAndSlots(board, 0),
-            "카드를 배치해서 점수를 얻었습니다.",
-            ScoreAnchor(board));
 
         yield return DrawAndPlace(board, "2", 1, "기차 칸을 눌러 카드를 배치해 보세요.");
         yield return ShowMessageOn(
             ScoreAndSlots(board, 0, 1),
+            "카드를 배치해서 점수를 얻었습니다.",
+            ScoreAnchor(board));
+
+        yield return DrawAndPlace(board, "3", 2, "기차 칸을 눌러 카드를 배치해 보세요.");
+        yield return ShowMessageOn(
+            ScoreAndSlots(board, 0, 1, 2),
             "숫자를 오름차순으로 배치하면 얻는 점수가 더 늘어납니다.",
             ScoreAnchor(board));
 
-        yield return DrawAndPlace(board, "J", 2, "조커 카드! 어디에 배치해도 오름차순으로 인정돼요.");
+        yield return DrawAndPlace(board, "J", 3, "조커 카드! 어디에 배치해도 오름차순으로 인정돼요.");
 
-        _spotlight.Hide();
+        HideBoardSpotlight();
         board.ClearAllowedPlacementSlot();
         yield return AutoFillRemaining(board);
         yield return ShowMessageOn(
@@ -74,7 +76,7 @@ public class StreamsTutorialController : MonoBehaviour
 
         _flow.PrepareTutorialResult();
         yield return WaitForResultButton();
-        _spotlight.Hide();
+        HideBoardSpotlight();
         yield return ShowResultGraphMessage();
         yield return ShowResultEndButton();
     }
@@ -93,6 +95,7 @@ public class StreamsTutorialController : MonoBehaviour
         _onPlaced = () => placed = true;
         board.OnPlayerCardPlaced += _onPlaced;
 
+        KeepBoardEndBright();
         _spotlight.Show(
             SlotRects(slot),
             message,
@@ -105,15 +108,16 @@ public class StreamsTutorialController : MonoBehaviour
         board.OnPlayerCardPlaced -= _onPlaced;
         _onPlaced = null;
         board.ClearAllowedPlacementSlot();
-        _spotlight.Hide();
+        HideBoardSpotlight();
         PlaceAiRandom(card);
     }
 
     IEnumerator ShowMessageOn(IList<RectTransform> targets, string message, RectTransform coachAnchor = null)
     {
+        KeepBoardEndBright();
         _spotlight.Show(targets, message, blockClicks: true, worldCamera: _flow.PlayerCamera, coachAnchor: coachAnchor);
         yield return _spotlight.WaitForTap();
-        _spotlight.Hide();
+        HideBoardSpotlight();
     }
 
     IEnumerator ShowResultGraphMessage()
@@ -163,12 +167,24 @@ public class StreamsTutorialController : MonoBehaviour
             yield return null;
     }
 
+    void KeepBoardEndBright()
+    {
+        Button end = _flow != null ? _flow.endButton : null;
+        _spotlight?.SetKeepBright(end != null ? end.transform as RectTransform : null);
+    }
+
+    void HideBoardSpotlight()
+    {
+        if (_spotlight != null)
+            _spotlight.Hide();
+    }
+
     IEnumerator AutoFillRemaining(num_path board)
     {
         var aiSlots = EmptySlots(_flow.OpponentBoard);
         Shuffle(aiSlots);
 
-        int slot = 3;
+        int slot = 4;
         int aiIndex = 0;
         for (int i = 0; i < RemainingCards.Length; i++)
         {
@@ -249,6 +265,7 @@ public class StreamsTutorialController : MonoBehaviour
         next.gameObject.SetActive(true);
         yield return null;
         var nextRt = next.transform as RectTransform;
+        KeepBoardEndBright();
         _spotlight.Show(
             nextRt != null ? new[] { nextRt } : null,
             "",

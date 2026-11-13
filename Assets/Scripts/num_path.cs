@@ -17,6 +17,7 @@ public class num_path : MonoBehaviour
 
     const string PlayerScoreObjectName = "PlayerScoreText";
     const string AiScoreObjectName = "AIScoreText";
+    const string RemainTextObjectName = "RemainText";
     const string BoardCanvasName = "BoardCanvas";
 
     /// <summary>플레이어가 이번에 뽑은 카드를 칸에 놓았을 때 한 번 호출됩니다.</summary>
@@ -28,16 +29,19 @@ public class num_path : MonoBehaviour
 
     int _displayedUiScore;
     bool _hasDisplayedUiScore;
+    GameObject _remainRoot;
+    TextMeshProUGUI _remainText;
     Vector3 _uiScoreBaseScale = Vector3.one;
     bool _uiScoreScaleCaptured;
     Coroutine _scorePop;
     bool _placementRestricted;
     int _allowedPlacementSlot = -1;
 
+    // index = run 길이. 1칸은 0점, 20칸은 300점.
     int[] scoreTable = new int[]
     {
-        0, 1, 3, 5, 7, 9, 11, 15, 20, 25,
-        30, 35, 40, 50, 60, 70, 85, 100, 150, 300
+        0, 0, 1, 3, 5, 7, 9, 11, 15, 20,
+        25, 30, 35, 40, 50, 60, 70, 85, 100, 150, 300
     };
 
     void Start()
@@ -103,6 +107,7 @@ public class num_path : MonoBehaviour
         {
             WireUiSlotClicks();
             RefreshUiRunOutlines();
+            RefreshRemainText();
             return;
         }
 
@@ -133,6 +138,7 @@ public class num_path : MonoBehaviour
         if (!HasUiSlots)
             Debug.LogWarning($"{name}: {boardName}/Slots에서 StreamsUiSlot을 찾지 못했습니다. 자식 순서와 컴포넌트를 확인하세요.");
         RefreshUiRunOutlines();
+        RefreshRemainText();
     }
 
     static Transform FindUiBoardRoot(string boardName)
@@ -239,6 +245,7 @@ public class num_path : MonoBehaviour
 
         UpdateCurrentScore();
         CheckAllFilled();
+        StreamsCardDrawCinematic.PlayPlacementBurst(uiSlots[idx]);
 
         if (isPlayerControlledBoard)
             OnPlayerCardPlaced?.Invoke();
@@ -254,12 +261,15 @@ public class num_path : MonoBehaviour
 
         UpdateCurrentScore();
         CheckAllFilled();
+        StreamsAiBoardPulse.PlayForSlot(uiSlots[idx].transform);
+        StreamsCardDrawCinematic.PlayPlacementBurst(uiSlots[idx]);
     }
 
     void UpdateCurrentScore()
     {
         SetUiScore(GetBoardScore(), popIfGained: true);
         RefreshUiRunOutlines();
+        RefreshRemainText();
     }
 
     void BindUiScoreLabel()
@@ -371,6 +381,47 @@ public class num_path : MonoBehaviour
         }
 
         return false;
+    }
+
+    void BindRemainText()
+    {
+        if (_remainText != null)
+            return;
+
+        _remainText = FindNamedTmp(RemainTextObjectName);
+        _remainRoot = _remainText != null ? _remainText.gameObject : null;
+    }
+
+    void RefreshRemainText()
+    {
+        if (!isPlayerControlledBoard)
+            return;
+
+        if (_remainText == null)
+            BindRemainText();
+        if (_remainRoot == null)
+            return;
+
+        int slotCount = SlotCount;
+        if (slotCount <= 0)
+            return;
+
+        int remaining = 0;
+        for (int i = 0; i < slotCount; i++)
+        {
+            if (!IsSlotFilled(i))
+                remaining++;
+        }
+
+        if (remaining <= 0)
+        {
+            _remainRoot.SetActive(false);
+            return;
+        }
+
+        _remainText.text = "남은 칸: " + remaining + "칸";
+        if (!_remainRoot.activeSelf)
+            _remainRoot.SetActive(true);
     }
 
     void RefreshUiRunOutlines()

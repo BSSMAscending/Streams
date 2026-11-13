@@ -7,8 +7,9 @@ using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 /// <summary>
-/// 게임 화면에서 일정 시간 동안 입력이 없으면 홈(StartScene)으로 돌아갑니다.
-/// 1분 남으면 TimeText를 천천히 드러내 카운트다운하고, 버튼 클릭이 있으면 빠르게 숨깁니다.
+/// 게임 화면에서 1분 동안 버튼 클릭이 없으면 홈(StartScene)으로 돌아갑니다.
+/// 20초 남으면 TimeText를 천천히 드러내 카운트다운하고, 버튼 클릭이 있으면 빠르게 숨깁니다.
+/// 10초 남으면 글자색이 빨강과 검정을 번갈아 깜빡입니다.
 /// 마우스 이동은 활동으로 보지 않고, UI 버튼 클릭만 타이머를 리셋합니다.
 /// 씬에 오브젝트를 넣을 필요 없이 플레이 시작 시 자동으로 등록됩니다.
 /// </summary>
@@ -16,10 +17,13 @@ public class StreamsIdleReturnHome : MonoBehaviour
 {
     const string HomeSceneName = "StartScene";
     const string TimeTextObjectName = "TimeText";
-    const float IdleSeconds = 180f;
-    const float WarningSeconds = 60f;
+    const float IdleSeconds = 60f;
+    const float WarningSeconds = 20f;
+    const float UrgentSeconds = 10f;
+    const float FlashHalfPeriod = 0.4f;
     const float FadeInSeconds = 1.4f;
     const float FadeOutSeconds = 0.22f;
+    static readonly Color UrgentRed = new Color(1f, 0.08f, 0.08f, 1f);
 
     static readonly List<RaycastResult> RaycastHits = new List<RaycastResult>();
 
@@ -97,7 +101,11 @@ public class StreamsIdleReturnHome : MonoBehaviour
         else
             _alpha = Mathf.MoveTowards(_alpha, 0f, dt / FadeOutSeconds);
 
-        _timeText.alpha = _alpha;
+        bool urgent = warning && remaining <= UrgentSeconds;
+        bool red = urgent && Mathf.Repeat(Time.unscaledTime, FlashHalfPeriod * 2f) < FlashHalfPeriod;
+        var color = red ? UrgentRed : Color.black;
+        color.a = _alpha;
+        _timeText.color = color;
         _timeText.raycastTarget = false;
 
         bool show = warning || _alpha > 0.001f;

@@ -7,10 +7,11 @@ using System.Collections.Generic;
 /// </summary>
 public static class StreamsMctsCore
 {
+    // index = run 길이. 1칸은 0점, 20칸은 300점.
     static readonly int[] ScoreTable =
     {
-        0, 1, 3, 5, 7, 9, 11, 15, 20, 25,
-        30, 35, 40, 50, 60, 70, 85, 100, 150, 300
+        0, 0, 1, 3, 5, 7, 9, 11, 15, 20,
+        25, 30, 35, 40, 50, 60, 70, 85, 100, 150, 300
     };
 
     public static int CalcScore(int[] board)

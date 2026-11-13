@@ -10,11 +10,13 @@ using UnityEngine.UI;
 
 /// <summary>
 /// 튜토리얼용 화면 딤. 지정한 RectTransform만 구멍으로 남기고 안내 문구를 띄웁니다.
+/// 클릭할 대상이 없으면 밝은 영역 테두리에 점선이 흐릅니다.
 /// </summary>
 [DefaultExecutionOrder(2000)]
 public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
 {
     const int SortingOrder = 40;
+    const int FrontSortingOrder = 45;
     const float DimAlpha = 0.80f;
     const float HolePadding = 16f;
     const float SlotSpritePadBottomExtra = 32f;
@@ -31,6 +33,8 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
     const float ClickIconLift = 48f;
     const float ClickIconBelowTextGap = 28f;
     const string ClickIconSpritePath = "Assets/Resources/ClickIcon.png";
+    const string ClickIconResourceName = "ClickIcon";
+    const string ClickIconRefResourceName = "ClickIconRef";
 
     static StreamsTutorialSpotlight _instance;
 
@@ -41,7 +45,9 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
     RectTransform _coachRoot;
     TextMeshProUGUI _coach;
     RectTransform _clickIcon;
+    StreamsDashedOutline _dashBorder;
     Image _clickIconImage;
+    Canvas _clickIconCanvas;
     Vector2 _clickIconBase;
     Camera _worldCamera;
     bool _tapped;
@@ -55,6 +61,15 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
     string _coachSource;
     bool _mergeHoles;
     bool _followTargets;
+    RectTransform _frontTarget;
+    Canvas _frontCanvas;
+    GraphicRaycaster _frontRaycaster;
+    bool _addedFrontCanvas;
+    bool _addedFrontRaycaster;
+    bool _savedOverrideSorting;
+    int _savedSortingOrder;
+    AdditionalCanvasShaderChannels _savedShaderChannels;
+    bool _savedCanvasEnabled;
     float _barRestPlayer;
     float _barRestAi;
     RectTransform _centerOn;
@@ -88,6 +103,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
 
     void OnDestroy()
     {
+        ReleaseFront(false);
         if (_instance == this)
             _instance = null;
     }
@@ -146,7 +162,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         _coach.alignment = TextAlignmentOptions.TopLeft;
         _coach.fontSize = CoachFontSize;
         _coach.color = Color.white;
-        _coach.enableWordWrapping = true;
+        _coach.textWrappingMode = TextWrappingModes.Normal;
         _coach.raycastTarget = false;
         var font = ResolveUiFont();
         if (font != null)
@@ -250,6 +266,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             Build();
         int otherOrder = other != null ? other.sortingOrder : SortingOrder;
         _canvas.sortingOrder = otherOrder + 10;
+        RaiseClickIcon();
     }
 
     public void SetGraphBarRestHeights(float playerRest, float aiRest)
@@ -294,21 +311,117 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         _canvas.enabled = true;
         _tapped = false;
         _dimRaycast = !blockClicks;
-        _showClickIcon = true;
+        _showClickIcon = !blockClicks;
         _clickOnHighlight = !blockClicks;
         _coachSource = message ?? "";
         _coach.text = _coachSource;
         _coach.overflowMode = TextOverflowModes.Overflow;
-        _coach.enableWordWrapping = true;
+        _coach.textWrappingMode = TextWrappingModes.Normal;
         _coach.gameObject.SetActive(!string.IsNullOrEmpty(_coachSource));
         if (_coachRoot != null)
             _coachRoot.gameObject.SetActive(!string.IsNullOrEmpty(_coachSource));
         _catcher.gameObject.SetActive(blockClicks);
+        if (_frontRaycaster != null)
+            _frontRaycaster.enabled = !blockClicks;
         RebuildDim();
 
         if (_rebuild != null)
             StopCoroutine(_rebuild);
         _rebuild = StartCoroutine(RebuildForLayout());
+    }
+
+    public void SetKeepBright(RectTransform target)
+    {
+        if (target == _frontTarget)
+        {
+            if (_frontCanvas != null)
+                _frontCanvas.sortingOrder = FrontSortingOrder;
+            RaiseClickIcon();
+            return;
+        }
+
+        ReleaseFront(true);
+        if (target != null)
+            BringFront(target);
+    }
+
+    public static void ReleaseRaisedButton()
+    {
+        if (_instance != null)
+            _instance.ReleaseFront(true);
+    }
+
+    void BringFront(RectTransform target)
+    {
+        Canvas parentCanvas = target.GetComponentInParent<Canvas>();
+        _frontTarget = target;
+        _frontCanvas = target.GetComponent<Canvas>();
+        _addedFrontCanvas = _frontCanvas == null;
+        if (_addedFrontCanvas)
+            _frontCanvas = target.gameObject.AddComponent<Canvas>();
+        else
+        {
+            _savedOverrideSorting = _frontCanvas.overrideSorting;
+            _savedSortingOrder = _frontCanvas.sortingOrder;
+            _savedShaderChannels = _frontCanvas.additionalShaderChannels;
+            _savedCanvasEnabled = _frontCanvas.enabled;
+        }
+
+        _frontCanvas.enabled = true;
+        _frontCanvas.overrideSorting = true;
+        _frontCanvas.sortingOrder = FrontSortingOrder;
+        _frontCanvas.additionalShaderChannels = parentCanvas != null
+            ? parentCanvas.additionalShaderChannels
+            : AdditionalCanvasShaderChannels.TexCoord1
+                | AdditionalCanvasShaderChannels.Normal
+                | AdditionalCanvasShaderChannels.Tangent;
+
+        _frontRaycaster = target.GetComponent<GraphicRaycaster>();
+        _addedFrontRaycaster = _frontRaycaster == null;
+        if (_addedFrontRaycaster)
+            _frontRaycaster = target.gameObject.AddComponent<GraphicRaycaster>();
+        _frontRaycaster.enabled = _catcher == null || !_catcher.gameObject.activeSelf;
+        RaiseClickIcon();
+    }
+
+    void ReleaseFront(bool immediate)
+    {
+        if (_frontTarget == null)
+            return;
+
+        if (_addedFrontRaycaster && _frontRaycaster != null)
+        {
+            if (immediate)
+                DestroyImmediate(_frontRaycaster);
+            else
+                Destroy(_frontRaycaster);
+        }
+
+        _frontRaycaster = null;
+        _addedFrontRaycaster = false;
+
+        if (_frontCanvas != null)
+        {
+            if (_addedFrontCanvas)
+            {
+                _frontCanvas.overrideSorting = false;
+                if (immediate)
+                    DestroyImmediate(_frontCanvas);
+                else
+                    Destroy(_frontCanvas);
+            }
+            else
+            {
+                _frontCanvas.overrideSorting = _savedOverrideSorting;
+                _frontCanvas.sortingOrder = _savedSortingOrder;
+                _frontCanvas.additionalShaderChannels = _savedShaderChannels;
+                _frontCanvas.enabled = _savedCanvasEnabled;
+            }
+        }
+
+        _frontCanvas = null;
+        _addedFrontCanvas = false;
+        _frontTarget = null;
     }
 
     public void Hide()
@@ -329,6 +442,9 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         _tapped = false;
         _showClickIcon = false;
         _clickOnHighlight = false;
+        ReleaseFront(true);
+        if (_dashBorder != null)
+            _dashBorder.Hide();
         if (_dimRoot != null)
             ClearChildren(_dimRoot);
         if (_coach != null)
@@ -408,6 +524,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         for (int i = 0; i < dark.Count; i++)
             CreateDimPanel(dark[i]);
 
+        LayoutDashBorder(highlightHoles);
         LayoutCoach(canvasLocal, highlightHoles);
         LayoutClickIcon(canvasLocal, highlightHoles);
         _laidOutSize = canvasLocal.size;
@@ -561,6 +678,40 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         }
     }
 
+    void LayoutDashBorder(List<Rect> holes)
+    {
+        EnsureDashBorder();
+        if (_dashBorder == null)
+            return;
+
+        if (_showClickIcon || holes == null || holes.Count == 0)
+        {
+            _dashBorder.Hide();
+            return;
+        }
+
+        _dashBorder.Show(holes, _uiFit);
+        _dashBorder.rectTransform.SetAsLastSibling();
+    }
+
+    void EnsureDashBorder()
+    {
+        if (_dashBorder != null || _dimRoot == null)
+            return;
+
+        var go = new GameObject(
+            "DashBorder",
+            typeof(RectTransform),
+            typeof(CanvasRenderer),
+            typeof(StreamsDashedOutline));
+        var rt = go.GetComponent<RectTransform>();
+        rt.SetParent(_dimRoot, false);
+        Stretch(rt);
+        _dashBorder = go.GetComponent<StreamsDashedOutline>();
+        _dashBorder.raycastTarget = false;
+        _dashBorder.gameObject.SetActive(false);
+    }
+
     void LayoutCoach(Rect canvasLocal, List<Rect> holes)
     {
         if (_coach == null)
@@ -587,7 +738,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         float wrapWidth = Mathf.Min(maxLine, Mathf.Max(minSide, canvasLocal.width * 0.42f));
         string wrapped = WrapToWidth(_coach, _coachSource, wrapWidth);
         _coach.text = wrapped;
-        _coach.enableWordWrapping = true;
+        _coach.textWrappingMode = TextWrappingModes.Normal;
 
         Vector2 pref = _coach.GetPreferredValues(wrapped, wrapWidth, 0f);
         float boxW = Mathf.Clamp(pref.x + 28f * fit, 56f * fit, wrapWidth + 28f * fit);
@@ -631,7 +782,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
             return;
 
         Sprite sprite = ResolveClickIconSprite();
-        var go = new GameObject("ClickIcon", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        var go = new GameObject("ClickIcon", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Canvas));
         _clickIcon = go.GetComponent<RectTransform>();
         _clickIcon.SetParent(_root != null ? _root : transform, false);
         _clickIcon.anchorMin = new Vector2(0.5f, 0.5f);
@@ -644,12 +795,30 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         _clickIconImage.preserveAspect = true;
         _clickIconImage.sprite = sprite;
         _clickIconImage.color = sprite != null ? Color.white : new Color(1f, 1f, 1f, 0f);
+
+        _clickIconCanvas = go.GetComponent<Canvas>();
+        _clickIconCanvas.overrideSorting = true;
+        RaiseClickIcon();
         _clickIcon.gameObject.SetActive(false);
+    }
+
+    void RaiseClickIcon()
+    {
+        if (_clickIconCanvas == null)
+            return;
+
+        int below = _canvas != null ? _canvas.sortingOrder : SortingOrder;
+        below = Mathf.Max(below, FrontSortingOrder);
+        if (_frontCanvas != null)
+            below = Mathf.Max(below, _frontCanvas.sortingOrder);
+        _clickIconCanvas.overrideSorting = true;
+        _clickIconCanvas.sortingOrder = below + 1;
     }
 
     void LayoutClickIcon(Rect canvasLocal, List<Rect> holes)
     {
         EnsureClickIcon();
+        RaiseClickIcon();
         if (_clickIcon == null)
             return;
 
@@ -1337,7 +1506,7 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         for (int i = parent.childCount - 1; i >= 0; i--)
         {
             var child = parent.GetChild(i);
-            if (child != null && (child.name == "CoachText" || child.name == "ClickIcon"))
+            if (child != null && (child.name == "CoachText" || child.name == "ClickIcon" || child.name == "DashBorder"))
                 continue;
 
             if (Application.isPlaying)
@@ -1365,13 +1534,83 @@ public class StreamsTutorialSpotlight : MonoBehaviour, IPointerClickHandler
         return fallback;
     }
 
+    static Sprite _clickIconSprite;
+    static bool _clickIconSearched;
+
     static Sprite ResolveClickIconSprite()
     {
+        if (_clickIconSearched)
+            return _clickIconSprite;
+
+        _clickIconSearched = true;
+
 #if UNITY_EDITOR
         var fromAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<Sprite>(ClickIconSpritePath);
-        if (fromAsset != null)
-            return fromAsset;
+        if (IsUsableSprite(fromAsset))
+        {
+            _clickIconSprite = fromAsset;
+            return _clickIconSprite;
+        }
 #endif
-        return Resources.Load<Sprite>("ClickIcon");
+        _clickIconSprite = LoadClickIconFromResources();
+        if (!IsUsableSprite(_clickIconSprite))
+            Debug.LogWarning("StreamsTutorialSpotlight: ClickIcon 스프라이트를 찾지 못했습니다.");
+        return _clickIconSprite;
+    }
+
+    // 에디터의 AssetDatabase 경로는 플레이어 빌드에 포함되지 않습니다.
+    // 단일 스프라이트는 Resources.Load<Sprite>가 비는 경우가 있어, 직접 참조한 프리팹과 텍스처까지 봅니다.
+    static Sprite LoadClickIconFromResources()
+    {
+        Sprite direct = Resources.Load<Sprite>(ClickIconResourceName);
+        if (IsUsableSprite(direct))
+            return direct;
+
+        Sprite[] sprites = Resources.LoadAll<Sprite>(ClickIconResourceName);
+        if (sprites != null)
+        {
+            for (int i = 0; i < sprites.Length; i++)
+            {
+                if (IsUsableSprite(sprites[i]))
+                    return sprites[i];
+            }
+        }
+
+        var holder = Resources.Load<GameObject>(ClickIconRefResourceName);
+        if (holder != null)
+        {
+            var image = holder.GetComponent<Image>();
+            if (image != null && IsUsableSprite(image.sprite))
+                return image.sprite;
+        }
+
+        Texture2D tex = Resources.Load<Texture2D>(ClickIconResourceName);
+        if (tex == null)
+        {
+            UnityEngine.Object[] assets = Resources.LoadAll(ClickIconResourceName);
+            if (assets != null)
+            {
+                for (int i = 0; i < assets.Length; i++)
+                {
+                    if (assets[i] is Sprite sprite && IsUsableSprite(sprite))
+                        return sprite;
+                    if (tex == null && assets[i] is Texture2D texture)
+                        tex = texture;
+                }
+            }
+        }
+
+        if (tex == null || !tex.isReadable)
+            return null;
+
+        return Sprite.Create(tex, new Rect(0f, 0f, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f);
+    }
+
+    static bool IsUsableSprite(Sprite sprite)
+    {
+        return sprite != null
+            && sprite.texture != null
+            && sprite.rect.width > 1f
+            && sprite.rect.height > 1f;
     }
 }

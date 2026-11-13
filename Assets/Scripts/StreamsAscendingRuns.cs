@@ -7,6 +7,20 @@ public static class StreamsAscendingRuns
     /// <summary>오름차순 사각형 기본 색. #00e7ff</summary>
     public static readonly Color DefaultColor = new Color(0f, 231f / 255f, 1f, 1f);
 
+    /// <summary>index = run 길이. 1칸은 0점, 20칸은 300점. num_path·MCTS와 동일합니다.</summary>
+    public static readonly int[] ScoreByLength =
+    {
+        0, 0, 1, 3, 5, 7, 9, 11, 15, 20,
+        25, 30, 35, 40, 50, 60, 70, 85, 100, 150, 300
+    };
+
+    public static int ScoreForLength(int length)
+    {
+        if (length <= 0)
+            return 0;
+        return ScoreByLength[Mathf.Clamp(length, 0, ScoreByLength.Length - 1)];
+    }
+
     /// <summary>
     /// 첫 구간은 기본 색, 이후는 이미 쓴 색과 가장 먼 보색 쪽으로 배치해 겹치지 않게 합니다.
     /// 순서: 0°, 180°, 90°, 270°, 45° …
@@ -115,7 +129,6 @@ public static class StreamsAscendingRuns
         int total = 0;
         int run = 0;
         int prev = -1;
-        int[] table = { 0, 1, 3, 5, 7, 9, 11, 15, 20, 25, 30, 35, 40, 50, 60, 70, 85, 100, 150, 300 };
 
         for (int i = 0; i < cards.Count; i++)
         {
@@ -123,7 +136,7 @@ public static class StreamsAscendingRuns
             if (string.IsNullOrEmpty(clean))
             {
                 if (run > 0)
-                    total += table[Mathf.Clamp(run, 0, table.Length - 1)];
+                    total += ScoreForLength(run);
                 run = 0;
                 prev = -1;
                 continue;
@@ -134,7 +147,7 @@ public static class StreamsAscendingRuns
 
             if (run > 0 && prev != -1 && value < prev)
             {
-                total += table[Mathf.Clamp(run, 0, table.Length - 1)];
+                total += ScoreForLength(run);
                 run = 1;
             }
             else
@@ -146,7 +159,7 @@ public static class StreamsAscendingRuns
         }
 
         if (run > 0)
-            total += table[Mathf.Clamp(run, 0, table.Length - 1)];
+            total += ScoreForLength(run);
         return total;
     }
 

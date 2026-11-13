@@ -16,6 +16,8 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
 
     [Header("숫자")]
     public TextMeshProUGUI numberText;
+    [Tooltip("칸 왼쪽 위. 칸 순서(1부터)를 표시합니다.")]
+    public TextMeshProUGUI cardNumText;
 
     [Header("안내 사각형")]
     [Tooltip("점선 색. 기본은 검은색.")]
@@ -72,8 +74,12 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
     {
         if (targetImage == null)
             targetImage = GetComponent<Image>();
+        EnsureCardNumText();
         if (numberText != null)
             numberText.raycastTarget = false;
+        if (cardNumText != null)
+            cardNumText.raycastTarget = false;
+        RefreshSlotOrderLabel();
         EnsureHitArea();
         Transform legacyHint = transform.Find("HintRect");
         if (legacyHint != null)
@@ -93,6 +99,7 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
     public void BindPlacement(int index, System.Action<int> onPlace, bool playerControlled)
     {
         _slotIndex = index;
+        RefreshSlotOrderLabel();
         _onPlace = onPlace;
         EnsureHitArea();
         _button = GetComponent<Button>();
@@ -216,6 +223,8 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
             Mathf.Max(0f, hitPaddingTop - expand),
             Mathf.Max(0f, hitPaddingBottom - expand));
         _hitArea.transform.SetAsLastSibling();
+        if (cardNumText != null)
+            cardNumText.transform.SetAsLastSibling();
     }
 
     Image CreateHitArea()
@@ -341,6 +350,54 @@ public class StreamsUiSlot : MonoBehaviour, IPointerDownHandler, IPointerUpHandl
         if (numberText == null)
             return;
         numberText.text = value;
+    }
+
+    void EnsureCardNumText()
+    {
+        if (cardNumText != null)
+            return;
+        Transform found = transform.Find("CardNumText");
+        if (found != null)
+            cardNumText = found.GetComponent<TextMeshProUGUI>();
+    }
+
+    void RefreshSlotOrderLabel()
+    {
+        EnsureCardNumText();
+        if (cardNumText == null)
+            return;
+
+        cardNumText.raycastTarget = false;
+        if (_slotIndex >= 0)
+            cardNumText.text = (_slotIndex + 1).ToString();
+        else if (IsHoldingPreview)
+            cardNumText.text = "";
+        else if (transform.parent != null && transform.parent.name == "Slots")
+            cardNumText.text = (transform.GetSiblingIndex() + 1).ToString();
+
+        if (numberText != null)
+            cardNumText.rectTransform.localRotation = numberText.rectTransform.localRotation;
+        else
+            cardNumText.rectTransform.localRotation = Quaternion.Inverse(transform.localRotation);
+        cardNumText.transform.SetAsLastSibling();
+    }
+
+    /// <summary>카드 그림 중심과 긴 변 길이. 슬롯 로컬 좌표이며, 피벗이 중심일 때의 anchoredPosition과 같습니다.</summary>
+    public void GetVisualLocalPlacement(out Vector2 center, out float size)
+    {
+        var rt = transform as RectTransform;
+        Rect sr = rt != null ? rt.rect : new Rect(-256f, -256f, VisualSpriteSize, VisualSpriteSize);
+        if (sr.width < 1f || sr.height < 1f)
+            sr = new Rect(-VisualSpriteSize * 0.5f, -VisualSpriteSize * 0.5f, VisualSpriteSize, VisualSpriteSize);
+
+        float sx = sr.width / VisualSpriteSize;
+        float sy = sr.height / VisualSpriteSize;
+        float xMin = sr.xMin + VisualPadLeft * sx;
+        float xMax = sr.xMax - VisualPadRight * sx;
+        float yMin = sr.yMin + VisualPadBottom * sy;
+        float yMax = sr.yMax - VisualPadTop * sy;
+        center = new Vector2((xMin + xMax) * 0.5f, (yMin + yMax) * 0.5f);
+        size = Mathf.Max(xMax - xMin, yMax - yMin);
     }
 
     /// <summary>카드 그림이 있는 영역(512 스프라이트에서 투명 여백을 뺀 네 모서리, 월드).</summary>

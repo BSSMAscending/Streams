@@ -84,6 +84,7 @@ public class StreamsCardDrawCinematic : MonoBehaviour
     readonly List<GameObject> _sparkles = new List<GameObject>();
     readonly List<Image> _sparklePool = new List<Image>();
     RectTransform _sparkleRoot;
+    StreamsPlacementBurstHost _burstHost;
     bool _playing;
     bool _skipIntro;
     bool _skipIntroAllowed;
@@ -105,6 +106,33 @@ public class StreamsCardDrawCinematic : MonoBehaviour
             yield break;
 
         yield return inst.Play(cardValue);
+    }
+
+    /// <summary>
+    /// 칸에 카드를 놓을 때, 뽑기 연출과 같은 반짝임을 카드 그림 크기에 맞춰 작게 터뜨립니다.
+    /// 보드 자식으로 붙여서, AI 보드처럼 부모가 작으면 그만큼 작아집니다.
+    /// </summary>
+    public static void PlayPlacementBurst(StreamsUiSlot slot)
+    {
+        if (slot == null || !slot.isActiveAndEnabled)
+            return;
+
+        var inst = EnsureInstance();
+        if (inst == null)
+            return;
+
+        inst.BurstHost().StartCoroutine(inst.PlacementBurst(slot));
+    }
+
+    StreamsPlacementBurstHost BurstHost()
+    {
+        if (_burstHost != null)
+            return _burstHost;
+
+        var go = new GameObject("PlacementBurstHost");
+        go.transform.SetParent(transform, false);
+        _burstHost = go.AddComponent<StreamsPlacementBurstHost>();
+        return _burstHost;
     }
 
     static StreamsCardDrawCinematic EnsureInstance()
@@ -663,21 +691,104 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         ClearSparkles();
         EnsureSparkleRoot();
         Vector2 origin = _card != null ? _card.anchoredPosition : Vector2.zero;
+        yield return PlaySparkleBurst(_sparkleRoot, origin, 1f, 1f, true);
+    }
+
+    const float PlacementCardReference = 512f;
+    const float PlacementSparkleSizeBoost = 2.4f;
+
+    IEnumerator PlacementBurst(StreamsUiSlot slot)
+    {
+        if (slot == null)
+            yield break;
+
+        var slotRect = slot.transform as RectTransform;
+        if (slotRect == null)
+            yield break;
+
+        slot.GetVisualLocalPlacement(out Vector2 center, out float visualSize);
+        float moveScale = Mathf.Clamp(visualSize / PlacementCardReference, 0.05f, 1f);
+        float sizeScale = moveScale * PlacementSparkleSizeBoost;
+
+        RectTransform board = FindBoardRect(slot.transform);
+        RectTransform parent = board != null ? board : slotRect;
+        var rootGo = new GameObject("PlacementSparkles", typeof(RectTransform));
+        var root = rootGo.GetComponent<RectTransform>();
+        root.SetParent(parent, false);
+        var canvas = rootGo.AddComponent<Canvas>();
+        canvas.overrideSorting = true;
+        canvas.sortingOrder = 5;
+        var raycaster = rootGo.GetComponent<GraphicRaycaster>();
+        if (raycaster != null)
+            raycaster.enabled = false;
+
+        root.anchorMin = root.anchorMax = parent.pivot;
+        root.pivot = new Vector2(0.5f, 0.5f);
+        root.localRotation = Quaternion.identity;
+        root.sizeDelta = Vector2.zero;
+
+        Vector3 worldCenter = slotRect.TransformPoint(new Vector3(center.x, center.y, 0f));
+        Vector3 localCenter = parent.InverseTransformPoint(worldCenter);
+        root.anchoredPosition = new Vector2(localCenter.x, localCenter.y);
+        float relative = RelativeUniformScale(slotRect, parent);
+        root.localScale = new Vector3(relative, relative, 1f);
+        root.SetAsLastSibling();
+
+        yield return PlaySparkleBurst(root, Vector2.zero, moveScale, sizeScale, false);
+
+        if (rootGo != null)
+            Destroy(rootGo);
+    }
+
+    static RectTransform FindBoardRect(Transform start)
+    {
+        for (Transform t = start; t != null; t = t.parent)
+        {
+            if (t.name == "PlayerBoard" || t.name == "AIBoard")
+                return t as RectTransform;
+        }
+
+        return null;
+    }
+
+    static float RelativeUniformScale(Transform slot, Transform parent)
+    {
+        float parentScale = Mathf.Abs(parent.lossyScale.x);
+        float slotScale = Mathf.Abs(slot.lossyScale.x);
+        if (parentScale < 0.0001f)
+            return 1f;
+
+        float relative = slotScale / parentScale;
+        var press = slot.GetComponent<UiButtonPressScale>();
+        if (press != null && Mathf.Abs(slot.localScale.x) > 0.0001f)
+            relative *= Mathf.Abs(press.RestLocalScale.x / slot.localScale.x);
+        return Mathf.Max(0.01f, relative);
+    }
+
+    IEnumerator PlaySparkleBurst(RectTransform parent, Vector2 origin, float moveScale, float sizeScale, bool usePool)
+    {
+        if (parent == null)
+            yield break;
+
         int count = Mathf.Max(4, sparkleCount);
         var items = new Sparkle[count];
+        moveScale = Mathf.Max(0.01f, moveScale);
+        sizeScale = Mathf.Max(0.01f, sizeScale);
 
         for (int i = 0; i < count; i++)
         {
             float angle = (360f / count) * i + Random.Range(-18f, 18f);
             float rad = angle * Mathf.Deg2Rad;
-            float speed = Random.Range(220f, 420f);
-            float size = Random.Range(10f, 22f);
-            var image = RentSparkle();
+            float speed = Random.Range(220f, 420f) * moveScale;
+            float size = Random.Range(10f, 22f) * sizeScale;
+            var image = usePool ? RentSparkle() : CreateImage("Sparkle", parent, new Color(1f, 0.95f, 0.72f, 1f));
             image.color = new Color(1f, 0.95f, 0.72f, 1f);
             if (sparkleSprite != null)
                 image.sprite = sparkleSprite;
             image.raycastTarget = false;
             var rt = image.rectTransform;
+            if (rt.parent != parent)
+                rt.SetParent(parent, false);
             rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
             rt.pivot = new Vector2(0.5f, 0.5f);
             rt.sizeDelta = new Vector2(size, size);
@@ -685,7 +796,8 @@ public class StreamsCardDrawCinematic : MonoBehaviour
             rt.localEulerAngles = new Vector3(0f, 0f, 45f);
             rt.localScale = Vector3.one;
             image.gameObject.SetActive(true);
-            _sparkles.Add(image.gameObject);
+            if (usePool)
+                _sparkles.Add(image.gameObject);
             items[i] = new Sparkle
             {
                 rt = rt,
@@ -724,7 +836,8 @@ public class StreamsCardDrawCinematic : MonoBehaviour
             yield return null;
         }
 
-        ClearSparkles();
+        if (usePool)
+            ClearSparkles();
     }
 
     void EnsureSparkleRoot()
@@ -941,9 +1054,20 @@ public class StreamsCardDrawCinematic : MonoBehaviour
     {
         foreach (var slot in FindObjectsByType<StreamsUiSlot>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
         {
-            if (slot != null && !slot.isFilled)
+            if (slot != null && !slot.isFilled && !IsUnderHelpBoard(slot.transform))
                 slot.SetHint();
         }
+    }
+
+    static bool IsUnderHelpBoard(Transform start)
+    {
+        for (Transform t = start; t != null; t = t.parent)
+        {
+            if (t.name == "HelpBoard")
+                return true;
+        }
+
+        return false;
     }
 
     void ResolvePouchSprite()
@@ -1017,7 +1141,7 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         skipHint.color = new Color(1f, 1f, 1f, SkipHintAlpha);
         skipHint.alignment = TextAlignmentOptions.BottomLeft;
         skipHint.raycastTarget = false;
-        skipHint.enableWordWrapping = false;
+        skipHint.textWrappingMode = TextWrappingModes.NoWrap;
         skipHint.overflowMode = TextOverflowModes.Overflow;
 
         TMP_FontAsset font = ResolveUiFont();
@@ -1114,4 +1238,9 @@ public class StreamsCardDrawCinematic : MonoBehaviour
         public float life;
         public float size;
     }
+}
+
+/// <summary>배치 반짝임 코루틴용. 뽑기 연출이 코루틴을 멈춰도 이쪽은 이어서 재생됩니다.</summary>
+sealed class StreamsPlacementBurstHost : MonoBehaviour
+{
 }

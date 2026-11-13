@@ -29,7 +29,7 @@ public class StreamsGameFlowController : MonoBehaviour
 
     [Header("게임 종료")]
     public string startSceneName = "StartScene";
-    [Tooltip("비우면 씬에서 이름 EndButton을 찾습니다. 누르면 StartScene으로 갑니다.")]
+    [Tooltip("비우면 씬에서 이름 EndButton을 찾습니다. 누르면 그만둘지 확인한 뒤 StartScene으로 갑니다.")]
     public Button endButton;
     [Tooltip("비우면 씬에서 이름 NextButton을 찾습니다. 대전 종료 후 켜지고, 누르면 ResultCanvas를 띄웁니다.")]
     public Button nextButton;
@@ -76,6 +76,8 @@ public class StreamsGameFlowController : MonoBehaviour
         }
 
         BindResultCanvas();
+        ApplyDifficultyBackground();
+        ApplyDifficultyAiName();
     }
 
     void Start()
@@ -150,6 +152,103 @@ public class StreamsGameFlowController : MonoBehaviour
             aiModel = aiModels[0];
     }
 
+    /// <summary>
+    /// BoardCanvas/Background를 난이도 색으로 바꿉니다.
+    /// 원본 스프라이트가 푸른빛이므로, 곱한 결과가 회색빛 푸른색/초록/주황빛 노랑이 되게 보정한 값입니다.
+    /// </summary>
+    void ApplyDifficultyBackground()
+    {
+        if (StreamsTutorialSelection.IsActive)
+            return;
+
+        var canvas = GameObject.Find(BoardCanvasName);
+        if (canvas == null)
+            return;
+
+        Transform background = canvas.transform.Find("Background");
+        if (background == null)
+        {
+            Transform frame = canvas.transform.Find("AspectFrame");
+            if (frame != null)
+                background = frame.Find("Background");
+        }
+
+        var image = background != null ? background.GetComponent<Image>() : null;
+        if (image == null)
+            return;
+
+        image.color = BackgroundColorFor(CurrentDifficulty());
+    }
+
+    /// <summary>AI 판 이름은 난이도 문구로, 결과 화면은 AI로 표시합니다.</summary>
+    void ApplyDifficultyAiName()
+    {
+        if (StreamsTutorialSelection.IsActive)
+            return;
+
+        ApplyBoardAiName(StreamsOpponentSelection.GetDisplayName(CurrentDifficulty()));
+        ApplyResultAiName("AI");
+    }
+
+    void ApplyBoardAiName(string label)
+    {
+        var board = GameObject.Find("AIBoard");
+        if (board == null)
+            return;
+
+        foreach (var tmp in board.GetComponentsInChildren<TextMeshProUGUI>(true))
+        {
+            if (tmp != null && tmp.name.StartsWith("AIName"))
+                SetSingleLineLabel(tmp, label);
+        }
+    }
+
+    void ApplyResultAiName(string label)
+    {
+        var tmp = FindNamedTmpUnder(resultCanvas != null ? resultCanvas.transform : null, "AIName");
+        if (tmp == null)
+            return;
+
+        SetSingleLineLabel(tmp, label);
+        var rt = tmp.rectTransform;
+        float left = rt.anchoredPosition.x - rt.sizeDelta.x * rt.pivot.x;
+        const float width = 560f;
+        rt.sizeDelta = new Vector2(width, Mathf.Max(rt.sizeDelta.y, 80f));
+        rt.anchoredPosition = new Vector2(left + width * rt.pivot.x, rt.anchoredPosition.y);
+        tmp.enableAutoSizing = true;
+        tmp.fontSizeMin = 36f;
+        tmp.fontSizeMax = 72f;
+    }
+
+    static void SetSingleLineLabel(TextMeshProUGUI tmp, string label)
+    {
+        tmp.text = label;
+        tmp.textWrappingMode = TextWrappingModes.NoWrap;
+        tmp.overflowMode = TextOverflowModes.Overflow;
+    }
+
+    StreamsAiMctsPerformance CurrentDifficulty()
+    {
+        if (aiModel != null)
+            return aiModel.mctsPerformance;
+        if (StreamsOpponentSelection.HasSelection)
+            return StreamsOpponentSelection.SelectedOpponent;
+        return StreamsAiMctsPerformance.Normal;
+    }
+
+    static Color BackgroundColorFor(StreamsAiMctsPerformance level)
+    {
+        switch (level)
+        {
+            case StreamsAiMctsPerformance.Weak:
+                return new Color32(0x68, 0x7A, 0xB8, 0xFF);
+            case StreamsAiMctsPerformance.Strong:
+                return new Color32(0xAB, 0x7E, 0x1F, 0xFF);
+            default:
+                return new Color32(0x48, 0x91, 0x42, 0xFF);
+        }
+    }
+
     void OnDestroy()
     {
         _gameEnded = true;
@@ -159,7 +258,10 @@ public class StreamsGameFlowController : MonoBehaviour
         if (endButton != null)
             endButton.onClick.RemoveListener(OnEndButtonPressed);
         if (_resultEndButton != null)
+        {
             _resultEndButton.onClick.RemoveListener(OnEndButtonPressed);
+            _resultEndButton.onClick.RemoveListener(QuitToStart);
+        }
         if (nextButton != null)
             nextButton.onClick.RemoveListener(OnNextButtonPressed);
     }
@@ -272,6 +374,14 @@ public class StreamsGameFlowController : MonoBehaviour
         if (string.IsNullOrWhiteSpace(startSceneName))
             return;
 
+        StreamsQuitConfirmPopup.Show(QuitToStart);
+    }
+
+    void QuitToStart()
+    {
+        if (string.IsNullOrWhiteSpace(startSceneName))
+            return;
+
         StreamsTutorialSelection.Clear();
         StreamsSceneTransition.Load(startSceneName);
     }
@@ -279,7 +389,7 @@ public class StreamsGameFlowController : MonoBehaviour
     /// <summary>튜토리얼이 NextButton / 결과 화면을 쓸 수 있게 점수를 확정합니다.</summary>
     public void PrepareTutorialResult()
     {
-        _winnerTextOverride = null;
+        _winnerTextOverride = "AI를 이겼어요!";
         _gameEnded = true;
         StreamsGameResults.SaveFromDuel(playerBoard, AiBoard);
     }
@@ -311,7 +421,9 @@ public class StreamsGameFlowController : MonoBehaviour
         if (_resultEndButton == null)
             _resultEndButton = FindNamedButtonUnder(resultCanvas.transform, EndButtonObjectName);
 
-        WireButton(_resultEndButton, OnEndButtonPressed, hide: false);
+        if (_resultEndButton != null)
+            _resultEndButton.onClick.RemoveListener(OnEndButtonPressed);
+        WireButton(_resultEndButton, QuitToStart, hide: false);
     }
 
     void ShowResultCanvas()
@@ -324,6 +436,7 @@ public class StreamsGameFlowController : MonoBehaviour
             return;
         }
 
+        StreamsTutorialSpotlight.ReleaseRaisedButton();
         resultCanvas.gameObject.SetActive(true);
         FillWinnerText();
 
@@ -339,20 +452,13 @@ public class StreamsGameFlowController : MonoBehaviour
         if (label == null)
             return;
 
-        if (!string.IsNullOrEmpty(_winnerTextOverride))
-        {
-            label.text = _winnerTextOverride;
-            return;
-        }
-
-        int playerScore = StreamsGameResults.PlayerScore;
-        int aiScore = StreamsGameResults.OpponentScore;
-        if (playerScore > aiScore)
-            label.text = "플레이어 승리!";
-        else if (aiScore > playerScore)
-            label.text = "AI 승리!";
-        else
-            label.text = "무승부";
+        string text = !string.IsNullOrEmpty(_winnerTextOverride)
+            ? _winnerTextOverride
+            : StreamsOpponentSelection.GetResultHeadline(
+                CurrentDifficulty(),
+                StreamsGameResults.PlayerScore,
+                StreamsGameResults.OpponentScore);
+        SetSingleLineLabel(label, text);
     }
 
     static Canvas FindNamedCanvas(string objectName)
