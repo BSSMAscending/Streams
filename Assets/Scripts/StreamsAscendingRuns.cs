@@ -109,7 +109,53 @@ public static class StreamsAscendingRuns
         front[jokerIdx] = CopyNeighborValue(processed, jokerIdx - 1);
         var back = new List<string>(processed);
         back[jokerIdx] = CopyNeighborValue(processed, jokerIdx + 1);
-        return ScoreNoJoker(front) >= ScoreNoJoker(back) ? front : back;
+
+        int frontScore = ScoreNoJoker(front);
+        int backScore = ScoreNoJoker(back);
+        if (frontScore != backScore)
+            return frontScore > backScore ? front : back;
+
+        // 2~6칸, 8~12칸처럼 점수 증가분이 같은 길이는 총점이 같다.
+        // 그때 >= 로 왼쪽을 고르면 오른쪽이 더 길어도 짧은 쪽에 붙는다.
+        int frontLen = RunLengthContaining(front, jokerIdx);
+        int backLen = RunLengthContaining(back, jokerIdx);
+        return frontLen >= backLen ? front : back;
+    }
+
+    /// <summary>조커를 치환한 뒤 그 칸이 들어 있는 오름차순 구간 길이.</summary>
+    static int RunLengthContaining(List<string> cards, int index)
+    {
+        int runStart = 0;
+        int prevValue = -1;
+
+        for (int i = 0; i < cards.Count; i++)
+        {
+            string clean = cards[i];
+            if (string.IsNullOrEmpty(clean))
+            {
+                if (index >= runStart && index < i)
+                    return i - runStart;
+                runStart = i + 1;
+                prevValue = -1;
+                continue;
+            }
+
+            if (!int.TryParse(clean, out int value))
+                continue;
+
+            if (prevValue != -1 && value < prevValue)
+            {
+                if (index >= runStart && index < i)
+                    return i - runStart;
+                runStart = i;
+            }
+
+            prevValue = value;
+        }
+
+        if (index >= runStart && index < cards.Count)
+            return cards.Count - runStart;
+        return 0;
     }
 
     /// <summary>조커를 이웃 숫자로 바꿀 때 빈 칸·조커는 0으로 둡니다. 혼자 있는 J도 한 칸 run이 됩니다.</summary>
